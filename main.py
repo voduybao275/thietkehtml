@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import tkinter as tk
@@ -276,6 +277,11 @@ class App(tk.Tk):
         self._drop_row = None
         self._drop_mode = None
         self._drop_indicator = None
+        self._rename_entry = None
+        self._rename_layer = None
+        self._move_last = None
+        self._move_moved = False
+        self._export_window = None
 
         self._build_fonts()
         self._build_ui()
@@ -366,6 +372,9 @@ class App(tk.Tk):
             side="left", padx=2
         )
         self._make_menu_item(nav, "Lưu", self._save_document).pack(
+            side="left", padx=2
+        )
+        self._make_menu_item(nav, "Export", self._open_export_window).pack(
             side="left", padx=2
         )
         self._make_menu_item(nav, "Thoát", self._on_close, danger=True).pack(
@@ -897,6 +906,37 @@ class App(tk.Tk):
         self.active_layer = layer
         return layer
 
+    def _clone_layer(self, layer):
+        clone = Layer(layer.name)
+        clone.visible = layer.visible
+        clone.expanded = layer.expanded
+        clone.items = [dict(item) for item in layer.items]
+        clone.children = [self._clone_layer(child) for child in layer.children]
+        for child in clone.children:
+            child.parent = clone
+        return clone
+
+    def _duplicate_layer(self, _event=None):
+        entry = self._rename_entry
+        if entry is not None and entry.winfo_exists():
+            return "break"
+        layer = self.active_layer
+        if layer is None:
+            return "break"
+        self._push_history()
+        clone = self._clone_layer(layer)
+        clone.name = f"{layer.name} copy"
+        clone.parent = layer.parent
+        siblings = layer.parent.children if layer.parent else self.layers
+        siblings.insert(siblings.index(layer) + 1, clone)
+        if layer.parent is not None:
+            layer.parent.expanded = True
+        self.active_layer = clone
+        self._refresh_layers()
+        self._render_document()
+        self._refresh_doc_tab()
+        return "break"
+
     def _iter_layers(self, layers=None):
         for layer in self.layers if layers is None else layers:
             yield layer
@@ -1049,6 +1089,8 @@ class App(tk.Tk):
         self._update_status()
 
     def _refresh_layers(self):
+        self._rename_entry = None
+        self._rename_layer = None
         for child in self.layer_list.winfo_children():
             child.destroy()
         self._drop_row = None
@@ -1116,6 +1158,11 @@ class App(tk.Tk):
             widget.bind(
                 "<Button-1>", lambda event, l=layer: self._on_layer_press(event, l)
             )
+        name.bind(
+            "<Double-Button-1>",
+            lambda _e, l=layer, w=name: self._begin_rename(l, w),
+        )
+        Tooltip(name, "Nhấp đúp để đổi tên lớp")
 
         row._layer_bg_widgets = bg_widgets
         row._layer_eye = eye
@@ -1132,6 +1179,92 @@ class App(tk.Tk):
         self._drag_moved = False
         self._drag_blocked = False
         self._drag_in_panel = True
+
+    def _begin_rename(self, layer, label):
+        entry = self._rename_entry
+        if entry is not None and entry.winfo_exists():
+            entry.focus_set()
+            entry.select_range(0, "end")
+            return "break"
+        row = label.master
+        info = label.pack_info()
+        entry = tk.Entry(
+            row,
+            font=self.font_layer,
+            fg=TEXT,
+            bg=label.cget("bg"),
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=ACCENT,
+            highlightcolor=ACCENT,
+            insertbackground=TEXT,
+        )
+        entry.insert(0, layer.name)
+        entry.pack(
+            side=info["side"],
+            fill=info["fill"],
+            expand=info["expand"],
+            padx=info["padx"],
+            pady=info["pady"],
+        )
+        bg_widgets = getattr(row, "_layer_bg_widgets", None)
+        if bg_widgets is not None and label in bg_widgets:
+            bg_widgets[bg_widgets.index(label)] = entry
+        label.destroy()
+        self._rename_entry = entry
+        self._rename_layer = layer
+        self._drag_layer = None
+        self._drag_moved = False
+        entry.bind(
+            "<Return>", lambda _e, l=layer, w=entry: self._commit_rename(l, w)
+        )
+        entry.bind(
+            "<KP_Enter>", lambda _e, l=layer, w=entry: self._commit_rename(l, w)
+        )
+        entry.bind("<Escape>", lambda _e, w=entry: self._cancel_rename(w))
+        entry.bind(
+            "<FocusOut>", lambda _e, l=layer, w=entry: self._commit_rename(l, w)
+        )
+        entry.focus_set()
+        entry.select_range(0, "end")
+        entry.icursor("end")
+        return "break"
+
+    def _commit_rename(self, layer, entry):
+        if self._rename_entry is not entry or not entry.winfo_exists():
+            return "break"
+        self._rename_entry = None
+        self._rename_layer = None
+        name = entry.get().strip()
+        entry.destroy()
+        if name and name != layer.name:
+            self._push_history()
+            layer.name = name
+            self._refresh_doc_tab()
+        self._refresh_layers()
+        return "break"
+
+    def _cancel_rename(self, entry):
+        if self._rename_entry is not entry or not entry.winfo_exists():
+            return "break"
+        self._rename_entry = None
+        self._rename_layer = None
+        entry.destroy()
+        self._refresh_layers()
+        return "break"
+
+    def _commit_rename_if_outside(self, event):
+        entry = self._rename_entry
+        if entry is None or not entry.winfo_exists():
+            return
+        widget = event.widget
+        if widget is None or not widget.winfo_exists():
+            return
+        while widget is not None:
+            if widget is entry:
+                return
+            widget = getattr(widget, "master", None)
+        self._commit_rename(self._rename_layer, entry)
 
     def _find_layer_row(self, x_root, y_root):
         widget = self.winfo_containing(x_root, y_root)
@@ -1351,6 +1484,12 @@ class App(tk.Tk):
                 self.active_layer.items.append(record)
                 self._draw_record(record)
                 self._refresh_doc_tab()
+        elif tool == "move":
+            if self.active_layer is not None and self._has_drawable_items(
+                self.active_layer
+            ):
+                self._move_last = (event.x, event.y)
+                self._move_moved = False
 
     def _on_canvas_drag(self, event):
         tool = self.active_tool_id
@@ -1369,6 +1508,17 @@ class App(tk.Tk):
         elif tool == "rect" and self._rect_preview is not None:
             x1, y1 = self._rect_start
             self.doc_canvas.coords(self._rect_preview, x1, y1, event.x, event.y)
+        elif tool == "move" and self._move_last is not None:
+            dx = event.x - self._move_last[0]
+            dy = event.y - self._move_last[1]
+            if dx == 0 and dy == 0:
+                return
+            if not self._move_moved:
+                self._push_history()
+                self._move_moved = True
+            self._move_last = (event.x, event.y)
+            self._translate_layer(self.active_layer, dx, dy)
+            self._render_document()
 
     def _on_canvas_release(self, event):
         tool = self.active_tool_id
@@ -1419,6 +1569,40 @@ class App(tk.Tk):
                 self._refresh_layers()
                 self._draw_record(record)
                 self._refresh_doc_tab()
+        elif tool == "move" and self._move_last is not None:
+            moved = self._move_moved
+            self._move_last = None
+            self._move_moved = False
+            if moved:
+                self._refresh_info()
+                self._refresh_doc_tab()
+
+    def _has_drawable_items(self, layer):
+        if layer.items:
+            return True
+        return any(self._has_drawable_items(child) for child in layer.children)
+
+    def _translate_layer(self, layer, dx, dy):
+        for record in layer.items:
+            self._translate_record(record, dx, dy)
+        for child in layer.children:
+            self._translate_layer(child, dx, dy)
+
+    def _translate_record(self, record, dx, dy):
+        kind = record.get("type")
+        if kind == "line":
+            record["coords"] = [
+                value + (dx if index % 2 == 0 else dy)
+                for index, value in enumerate(record["coords"])
+            ]
+        elif kind in ("dot", "text"):
+            record["x"] += dx
+            record["y"] += dy
+        elif kind == "rect":
+            record["x1"] += dx
+            record["y1"] += dy
+            record["x2"] += dx
+            record["y2"] += dy
 
     def _draw_record(self, record):
         kind = record["type"]
@@ -1550,6 +1734,359 @@ class App(tk.Tk):
         self._refresh_doc_tab()
         return True
 
+    def _open_export_window(self):
+        window = self._export_window
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_force()
+            return
+
+        window = tk.Toplevel(self)
+        self._export_window = window
+        window.title("Export")
+        window.configure(bg=PANEL_BG)
+        window.resizable(True, True)
+        window.minsize(640, 420)
+        window.transient(self)
+        window.protocol(
+            "WM_DELETE_WINDOW", lambda: self._close_export_window(window)
+        )
+        window.bind("<Escape>", lambda _e: self._close_export_window(window))
+
+        body = tk.Frame(window, bg=PANEL_BG, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="Export HTML",
+            font=self.font_brand,
+            fg=TEXT,
+            bg=PANEL_BG,
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="Xem trước HTML và CSS, xuất cấu trúc lớp thành tệp HTML.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(anchor="w", pady=(4, 16))
+
+        tk.Label(
+            body,
+            text="TỆP HTML",
+            font=self.font_panel,
+            fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(anchor="w")
+
+        path_row = tk.Frame(body, bg=PANEL_BG)
+        path_row.pack(fill="x", pady=(6, 18))
+
+        path_var = tk.StringVar(value=self._suggest_export_path())
+        entry = tk.Entry(
+            path_row,
+            textvariable=path_var,
+            font=self.font_layer,
+            fg=TEXT,
+            bg=BG,
+            insertbackground=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+        )
+        entry.pack(side="left", fill="x", expand=True, ipady=6)
+        entry.bind(
+            "<Return>",
+            lambda _e: self._export_html_from_dialog(window, path_var),
+        )
+
+        tk.Button(
+            path_row,
+            text="Chọn…",
+            command=lambda: self._choose_export_path(path_var),
+            font=self.font_menu,
+            fg=TEXT,
+            bg=HOVER_BG,
+            activebackground=BORDER,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=12,
+            pady=5,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="left", padx=(8, 0))
+
+        html_preview, css_preview = self._build_export_content()
+
+        preview = tk.Frame(body, bg=PANEL_BG)
+        preview.pack(fill="both", expand=True, pady=(0, 16))
+        preview.grid_columnconfigure(0, weight=1)
+        preview.grid_columnconfigure(1, weight=1)
+        preview.grid_rowconfigure(1, weight=1)
+
+        for column, (title, content) in enumerate(
+            (("HTML", html_preview), ("CSS", css_preview))
+        ):
+            tk.Label(
+                preview,
+                text=title,
+                font=self.font_panel,
+                fg=MUTED,
+                bg=PANEL_BG,
+            ).grid(
+                row=0,
+                column=column,
+                sticky="w",
+                padx=(0, 6) if column == 0 else (6, 0),
+            )
+            pane = tk.Frame(preview, bg=BG)
+            pane.grid(
+                row=1,
+                column=column,
+                sticky="nsew",
+                padx=(0, 6) if column == 0 else (6, 0),
+                pady=(6, 0),
+            )
+            text = tk.Text(
+                pane,
+                bg=BG,
+                fg=ICON,
+                insertbackground=ICON,
+                relief="flat",
+                font=("Consolas", 9),
+                wrap="none",
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                padx=10,
+                pady=8,
+            )
+            scroll = tk.Scrollbar(pane, command=text.yview)
+            text.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+            text.pack(side="left", fill="both", expand=True)
+            text.insert("1.0", content)
+            text.configure(state="disabled")
+
+        actions = tk.Frame(body, bg=PANEL_BG)
+        actions.pack(fill="x")
+
+        tk.Button(
+            actions,
+            text="Hủy",
+            command=lambda: self._close_export_window(window),
+            font=self.font_menu,
+            fg=TEXT,
+            bg=BORDER,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right")
+
+        tk.Button(
+            actions,
+            text="Xuất",
+            command=lambda: self._export_html_from_dialog(window, path_var),
+            font=self.font_menu,
+            fg=BG,
+            bg=ACCENT,
+            activebackground="#60a5fa",
+            activeforeground=BG,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right", padx=(0, 8))
+
+        width, height = 900, 600
+        window.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 3
+        window.geometry(f"{width}x{height}+{max(x, 0)}+{max(y, 0)}")
+        window.grab_set()
+        entry.focus_set()
+        entry.select_range(0, "end")
+
+    def _close_export_window(self, window):
+        if window is not None and window.winfo_exists():
+            window.grab_release()
+            window.destroy()
+        if self._export_window is window:
+            self._export_window = None
+
+    def _suggest_export_path(self):
+        base = os.path.splitext(os.path.basename(self.doc_name))[0] or "export"
+        folder = os.path.dirname(self.doc_path) if self.doc_path else os.getcwd()
+        return os.path.join(folder, f"{base}.html")
+
+    def _choose_export_path(self, path_var):
+        current = path_var.get().strip()
+        initial_dir = os.path.dirname(current)
+        if not os.path.isdir(initial_dir):
+            initial_dir = os.getcwd()
+        initial_file = os.path.basename(current) or f"{self.doc_name}.html"
+        path = filedialog.asksaveasfilename(
+            parent=self._export_window or self,
+            title="Xuất HTML",
+            defaultextension=".html",
+            initialdir=initial_dir,
+            initialfile=initial_file,
+            filetypes=[("HTML", "*.html"), ("Tất cả tệp", "*.*")],
+        )
+        if path:
+            path_var.set(path)
+
+    def _export_html_from_dialog(self, window, path_var):
+        path = path_var.get().strip()
+        if not path:
+            messagebox.showwarning(
+                "Export", "Vui lòng chọn nơi lưu tệp HTML.", parent=window
+            )
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".html"
+            path_var.set(path)
+        try:
+            self._write_html(path)
+        except OSError as error:
+            messagebox.showerror("Lỗi xuất tệp", str(error), parent=window)
+            return
+        self._close_export_window(window)
+        messagebox.showinfo("Export", f"Đã xuất tệp HTML:\n{path}", parent=self)
+
+    def _build_export_content(self):
+        html_lines = []
+        self._collect_html_layers(self.layers, html_lines, 1)
+        css_lines = []
+        self._collect_css_rules(self.layers, css_lines)
+        return "\n".join(html_lines), "\n".join(css_lines)
+
+    def _write_html(self, path):
+        html_body, css = self._build_export_content()
+        title = html.escape(self.doc_name)
+        document = "\n".join(
+            [
+                "<!DOCTYPE html>",
+                '<html lang="vi">',
+                "<head>",
+                '<meta charset="utf-8">',
+                f"<title>{title}</title>",
+                "<style>",
+                css,
+                "</style>",
+                "</head>",
+                "<body>",
+                html_body,
+                "</body>",
+                "</html>",
+                "",
+            ]
+        )
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(document)
+
+    def _collect_html_layers(self, layers, lines, depth):
+        indent = "  " * depth
+        for layer in layers:
+            if not layer.visible:
+                continue
+            class_name = html.escape(
+                self._layer_class_name(layer.name), quote=True
+            )
+            if layer.children:
+                lines.append(f'{indent}<div class="{class_name}">')
+                self._collect_html_layers(layer.children, lines, depth + 1)
+                lines.append(f"{indent}</div>")
+            else:
+                lines.append(f'{indent}<div class="{class_name}"></div>')
+
+    def _collect_css_rules(self, layers, lines):
+        for layer in layers:
+            if not layer.visible:
+                continue
+            box = self._layer_css_box(layer)
+            if box is not None:
+                if lines:
+                    lines.append("")
+                class_name = self._layer_class_name(layer.name)
+                lines.append(f".{class_name} {{")
+                lines.append(f"  width: {self._css_num(box['width'])}px;")
+                lines.append(f"  height: {self._css_num(box['height'])}px;")
+                if box["background"]:
+                    lines.append(f"  background: {box['background']};")
+                if box["border_width"] > 0 and box["border_color"]:
+                    lines.append(
+                        f"  border: {self._css_num(box['border_width'])}px "
+                        f"solid {box['border_color']};"
+                    )
+                lines.append("}")
+            self._collect_css_rules(layer.children, lines)
+
+    def _layer_css_box(self, layer):
+        rects = [r for r in layer.items if r.get("type") == "rect"]
+        if rects:
+            rect = rects[-1]
+            return {
+                "width": max(rect["x2"] - rect["x1"], 1),
+                "height": max(rect["y2"] - rect["y1"], 1),
+                "background": rect.get("background") or "",
+                "border_color": (
+                    rect.get("border_color")
+                    or rect.get("color")
+                    or BRUSH_COLOR
+                ),
+                "border_width": rect.get("border_width", 2),
+            }
+        bounds = self._record_bounds(layer.items)
+        if bounds is None:
+            return None
+        x1, y1, x2, y2 = bounds
+        return {
+            "width": max(x2 - x1, 1),
+            "height": max(y2 - y1, 1),
+            "background": "",
+            "border_color": "",
+            "border_width": 0,
+        }
+
+    def _record_bounds(self, records):
+        xs = []
+        ys = []
+        for record in records:
+            kind = record.get("type")
+            if kind == "rect":
+                xs.extend((record["x1"], record["x2"]))
+                ys.extend((record["y1"], record["y2"]))
+            elif kind == "line":
+                coords = record.get("coords") or []
+                xs.extend(coords[0::2])
+                ys.extend(coords[1::2])
+            elif kind == "dot":
+                radius = record.get("r", 0)
+                xs.extend((record["x"] - radius, record["x"] + radius))
+                ys.extend((record["y"] - radius, record["y"] + radius))
+            elif kind == "text":
+                xs.append(record["x"])
+                ys.append(record["y"])
+        if not xs or not ys:
+            return None
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _layer_class_name(self, name):
+        tokens = name.strip().split()
+        return "-".join(tokens) if tokens else "layer"
+
+    def _css_num(self, value):
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return f"{number:.2f}".rstrip("0").rstrip(".")
+
     def _confirm_save_changes(self):
         if not self.dirty:
             return True
@@ -1580,10 +2117,13 @@ class App(tk.Tk):
         self.bind("<Escape>", lambda _e: self.exit_fullscreen())
         self.bind("<Control-z>", self._undo)
         self.bind("<Control-Z>", self._undo)
+        self.bind("<Control-j>", self._duplicate_layer)
+        self.bind("<Control-J>", self._duplicate_layer)
         self.bind("<Control-s>", self._save_document)
         self.bind("<Control-o>", self._open_document)
         self.bind("<B1-Motion>", self._on_layer_drag, add="+")
         self.bind("<ButtonRelease-1>", self._on_layer_release, add="+")
+        self.bind("<Button-1>", self._commit_rename_if_outside, add="+")
 
     def enter_fullscreen(self):
         self.attributes("-fullscreen", True)
@@ -1641,7 +2181,7 @@ class App(tk.Tk):
         self.status.configure(
             text=f"Công cụ: {tool}    |    Lớp: {layer}"
                  f"    |    Tài liệu: {doc}    |    {mode} {size}"
-                 f"    |    F11 · Esc · Ctrl+Z · Ctrl+S · Ctrl+O"
+                 f"    |    F11 · Esc · Ctrl+J · Ctrl+Z · Ctrl+S · Ctrl+O"
         )
 
 
