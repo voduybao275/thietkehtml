@@ -1,9 +1,17 @@
+import base64
 import html
 import json
 import os
 import tkinter as tk
+from io import BytesIO
 from tkinter import font as tkfont
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
+
+try:
+    from PIL import Image, ImageGrab
+except ImportError:
+    Image = None
+    ImageGrab = None
 
 BG = "#0f172a"
 PANEL_BG = "#1e293b"
@@ -22,9 +30,16 @@ DROP_BG = "#1d4ed8"
 
 WINDOWED_SIZE = (1100, 700)
 MIN_SIZE = (760, 460)
+CONTENT_SIZE = (960, 540)
+RULER_SIZE = 22
+RULER_BG = "#0b1220"
+RULER_TICK = "#475569"
+GUIDE_COLOR = "#38bdf8"
 SIDEBAR_WIDTH = 56
-LAYER_PANEL_WIDTH = 230
+LAYER_PANEL_WIDTH = 240
 TOOL_SIZE = 40
+ZOOM_STEPS = (0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
+RULER_STEPS = (10, 20, 50, 100, 200, 500, 1000)
 
 
 def draw_move(c, col):
@@ -142,6 +157,10 @@ def draw_rect(c, col):
     c.create_rectangle(8, 10, 32, 30, outline=col, width=2)
 
 
+def draw_ellipse(c, col):
+    c.create_oval(8, 10, 32, 30, outline=col, width=2)
+
+
 def draw_hand(c, col):
     c.create_oval(10, 19, 29, 34, outline=col, width=2)
     for x, top in ((13, 12), (17, 9), (21, 9), (25, 13)):
@@ -184,8 +203,34 @@ CURSORS = {
     "brush": "pencil",
     "eraser": "dotbox",
     "rect": "crosshair",
+    "marquee": "crosshair",
     "text": "xterm",
 }
+
+TEXT_TAGS = ("p", "h1", "h2", "h3", "h4", "h5", "h6")
+
+GROUP_DISPLAYS = ("block", "flex", "grid")
+
+GROUP_ALIGNS = ("left", "center", "right")
+
+GROUP_JUSTIFIES = ("left", "center", "right", "between")
+
+SHORTCUTS = [
+    ("F1", "Mở/đóng tab hướng dẫn phím tắt"),
+    ("Ctrl + N", "Tạo project mới"),
+    ("Ctrl + O", "Mở tài liệu"),
+    ("Ctrl + S", "Lưu tài liệu"),
+    ("Ctrl + Shift + S", "Lưu tài liệu sang tệp khác"),
+    ("Ctrl + E", "Mở cửa sổ Export"),
+    ("Ctrl + Q", "Thoát ứng dụng"),
+    ("Ctrl + Z", "Hoàn tác"),
+    ("Ctrl + J", "Nhân bản lớp"),
+    ("Ctrl + G", "Nhóm các lớp đang chọn"),
+    ("Ctrl + ;", "Ẩn/hiện đường gióng"),
+    ("Ctrl + lăn chuột", "Thu phóng khung nội dung"),
+    ("F11", "Bật/tắt toàn màn hình"),
+    ("Esc", "Thoát toàn màn hình"),
+]
 
 
 class Layer:
@@ -196,6 +241,25 @@ class Layer:
         self.children = []
         self.parent = None
         self.expanded = True
+        self.background_image = None
+        self.display = "block"
+        self.align = "left"
+        self.justify = "left"
+        self.gap = 0
+
+
+class _DocEvent:
+    """Mouse event with canvas coordinates converted to document units."""
+
+    def __init__(self, event, zoom):
+        self.widget = event.widget
+        self.state = event.state
+        self.num = getattr(event, "num", 0)
+        self.delta = getattr(event, "delta", 0)
+        self.x_root = event.x_root
+        self.y_root = event.y_root
+        self.x = event.x / zoom
+        self.y = event.y / zoom
 
 
 class Tooltip:
@@ -253,19 +317,36 @@ class App(tk.Tk):
         self.minsize(*MIN_SIZE)
         self.is_fullscreen = False
         self.tool_items = {}
+        self.tool_tips = {}
         self.tool_names = {tool_id: name for tool_id, name, _draw in TOOLS}
+        self.rect_tool_shape = "rect"
         self.active_tool_id = None
         self.layers = []
         self.layer_counter = 0
         self.active_layer = None
+        self.selected_layers = []
+        self._selection_anchor = None
         self._stroke = None
         self._last_point = None
         self._temp_ids = []
         self._rect_start = None
         self._rect_preview = None
+        self.marquee_region = None
+        self._marquee_start = None
         self.history = []
         self.doc_name = "Chưa có tên-1"
+        self._new_doc_counter = 1
         self.doc_path = None
+        self.content_width, self.content_height = CONTENT_SIZE
+        self.content_full = False
+        self.body_font_family = "none"
+        self.zoom = 1.0
+        self._content_size_window = None
+        self.guides = []
+        self.guides_visible = True
+        self._guide_drag = None
+        self._moving_guide = None
+        self._guide_move_start = 0
         self.saved_signature = ""
         self.dirty = False
         self._updating_info = False
@@ -282,6 +363,14 @@ class App(tk.Tk):
         self._move_last = None
         self._move_moved = False
         self._export_window = None
+        self._image_refs = {}
+        self._image_scaled = {}
+        self._text_areas = []
+        self._record_offsets = {}
+        self._font_cache = {}
+        self._font_suggest_entry = None
+        self._text_editor = None
+        self._text_editor_record = None
 
         self._build_fonts()
         self._build_ui()
@@ -292,18 +381,23 @@ class App(tk.Tk):
         self._refresh_doc_tab()
         self.select_tool("brush")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(50, self.enter_fullscreen)
+        self.withdraw()
+        self.after(50, self.start_maximized)
 
     def _build_fonts(self):
         self.font_brand = tkfont.Font(family="Segoe UI", size=14, weight="bold")
-        self.font_menu = tkfont.Font(family="Segoe UI", size=10, weight="bold")
+        self.font_menu = tkfont.Font(family="Segoe UI", size=9, weight="bold")
         self.font_status = tkfont.Font(family="Consolas", size=10)
         self.font_panel = tkfont.Font(family="Segoe UI", size=9, weight="bold")
         self.font_layer = tkfont.Font(family="Segoe UI", size=10)
+        self.font_marquee = tkfont.Font(
+            family="Segoe UI", size=9, weight="bold"
+        )
 
     def _build_ui(self):
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, minsize=LAYER_PANEL_WIDTH)
 
         self._build_header()
         self._build_sidebar()
@@ -357,28 +451,53 @@ class App(tk.Tk):
         self.btn_fullscreen = self._make_menu_item(
             nav, "Toàn màn hình", self.toggle_fullscreen
         )
-        self.btn_fullscreen.pack(side="left", padx=2)
+        self.btn_fullscreen.pack(side="left", padx=1)
 
         self._make_menu_item(nav, "Thu nhỏ", self.minimize_window).pack(
-            side="left", padx=2
+            side="left", padx=1
         )
         self._make_menu_item(
             nav, "Cỡ nhỏ", lambda: self.set_window_size(800, 520)
-        ).pack(side="left", padx=2)
+        ).pack(side="left", padx=1)
         self._make_menu_item(
             nav, "Cỡ lớn", lambda: self.set_window_size(1300, 860)
-        ).pack(side="left", padx=2)
+        ).pack(side="left", padx=1)
+        self._make_menu_item(nav, "Mới", self._new_document).pack(
+            side="left", padx=1
+        )
+        self._make_menu_item(nav, "Chèn hình", self._insert_image).pack(
+            side="left", padx=1
+        )
         self._make_menu_item(nav, "Mở", self._open_document).pack(
-            side="left", padx=2
+            side="left", padx=1
         )
-        self._make_menu_item(nav, "Lưu", self._save_document).pack(
-            side="left", padx=2
+        self.save_menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg="#0b1220",
+            fg=TEXT,
+            activebackground=ACCENT,
+            activeforeground=BG,
+            font=("Segoe UI", 9),
         )
+        self.save_menu.add_command(
+            label="Lưu",
+            accelerator="Ctrl+S",
+            command=self._save_document,
+        )
+        self.save_menu.add_command(
+            label="Lưu khác…",
+            accelerator="Ctrl+Shift+S",
+            command=self._save_document_as,
+        )
+        save_item = self._make_menu_item(nav, "Lưu ▾", lambda: None)
+        save_item.bind("<Button-1>", self._open_save_menu)
+        save_item.pack(side="left", padx=1)
         self._make_menu_item(nav, "Export", self._open_export_window).pack(
-            side="left", padx=2
+            side="left", padx=1
         )
         self._make_menu_item(nav, "Thoát", self._on_close, danger=True).pack(
-            side="left", padx=2
+            side="left", padx=1
         )
 
     def _build_sidebar(self):
@@ -427,8 +546,10 @@ class App(tk.Tk):
         item.bind("<Leave>", lambda _e, tid=tool_id: self._tool_leave(tid))
         item.bind("<Button-1>", lambda _e, tid=tool_id: self.select_tool(tid))
         item.bind("<MouseWheel>", self._on_mousewheel)
+        if tool_id == "rect":
+            item.bind("<Button-3>", self._open_rect_shape_menu)
 
-        Tooltip(item, name)
+        self.tool_tips[tool_id] = Tooltip(item, name)
         self.tool_items[tool_id] = (item, backdrop)
 
     def _build_workspace(self):
@@ -451,27 +572,821 @@ class App(tk.Tk):
             pady=6,
         )
         self.doc_tab_label.pack()
+        self.doc_tab_label.configure(cursor="hand2")
+        self.doc_tab_label.bind("<Button-1>", self._hide_help_tab)
+
+        self.help_tab_label = tk.Label(
+            tabbar,
+            text="Hướng dẫn phím tắt",
+            font=self.font_layer,
+            fg=MUTED,
+            bg=PANEL_BG,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+        )
+        self.help_tab_label.pack(side="left", padx=(2, 0), pady=(12, 0))
+        self.help_tab_label.bind("<Button-1>", self._toggle_help_tab)
+        self.help_visible = False
+
+        self.content_size_button = tk.Label(
+            tabbar,
+            text="",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=BG,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+        )
+        self.content_size_button.pack(side="right", padx=(0, 32), pady=(12, 0))
+        self.content_size_button.bind(
+            "<Button-1>", lambda _e: self._open_content_size_dialog()
+        )
+        self.content_size_button.bind(
+            "<Enter>", lambda _e: self.content_size_button.configure(fg=TEXT)
+        )
+        self.content_size_button.bind(
+            "<Leave>", lambda _e: self.content_size_button.configure(fg=MUTED)
+        )
+        Tooltip(
+            self.content_size_button,
+            "Kích thước khung nội dung, nhấp để thay đổi",
+        )
+        self._update_content_size_label()
 
         wrap = tk.Frame(workspace, bg=BG)
         wrap.grid(row=1, column=0, sticky="nsew", padx=32, pady=(10, 26))
+        self.workspace_wrap = wrap
+        wrap.grid_rowconfigure(1, weight=1)
+        wrap.grid_columnconfigure(1, weight=1)
+
+        self.ruler_corner = tk.Canvas(
+            wrap,
+            width=RULER_SIZE,
+            height=RULER_SIZE,
+            bg=RULER_BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.ruler_corner.grid(row=0, column=0, sticky="nsew")
+        self.ruler_corner.create_line(
+            RULER_SIZE - 7,
+            RULER_SIZE - 1,
+            RULER_SIZE - 1,
+            RULER_SIZE - 7,
+            fill=RULER_TICK,
+        )
+        self.hruler = tk.Canvas(
+            wrap, height=RULER_SIZE, bg=RULER_BG, highlightthickness=0, bd=0
+        )
+        self.hruler.grid(row=0, column=1, sticky="ew")
+        self.vruler = tk.Canvas(
+            wrap, width=RULER_SIZE, bg=RULER_BG, highlightthickness=0, bd=0
+        )
+        self.vruler.grid(row=1, column=0, sticky="ns")
+
+        self.view_canvas = tk.Canvas(
+            wrap, bg=BG, highlightthickness=0, bd=0
+        )
+        self.view_canvas.grid(row=1, column=1, sticky="nsew")
+        self.vbar = tk.Scrollbar(
+            wrap,
+            orient="vertical",
+            command=self.view_canvas.yview,
+            bg=BORDER,
+            troughcolor=BG,
+            activebackground=HOVER_BG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.vbar.grid(row=1, column=2, sticky="ns")
+        self.hbar = tk.Scrollbar(
+            wrap,
+            orient="horizontal",
+            command=self.view_canvas.xview,
+            bg=BORDER,
+            troughcolor=BG,
+            activebackground=HOVER_BG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.hbar.grid(row=2, column=1, sticky="ew")
+        self.vbar.grid_remove()
+        self.hbar.grid_remove()
 
         self.doc_canvas = tk.Canvas(
-            wrap,
+            self.view_canvas,
+            width=self.content_width,
+            height=self.content_height,
             bg=DOC_BG,
             highlightthickness=1,
             highlightbackground="#475569",
             cursor="pencil",
         )
-        self.doc_canvas.pack(fill="both", expand=True)
+        self._doc_window = self.view_canvas.create_window(
+            0, 0, window=self.doc_canvas, anchor="nw"
+        )
+        self.view_canvas.configure(
+            yscrollcommand=self._on_view_yscroll,
+            xscrollcommand=self._on_view_xscroll,
+        )
+
+        self.view_canvas.bind("<Configure>", self._layout_content_viewport)
+        for ruler, orient in ((self.hruler, "h"), (self.vruler, "v")):
+            ruler.bind(
+                "<ButtonPress-1>",
+                lambda event, o=orient: self._start_guide_drag(o, event),
+            )
+            ruler.bind("<B1-Motion>", self._drag_guide)
+            ruler.bind("<ButtonRelease-1>", self._finish_guide_drag)
+        for widget in (self.view_canvas, self.doc_canvas):
+            widget.bind("<MouseWheel>", self._on_doc_mousewheel)
+            widget.bind("<Shift-MouseWheel>", self._on_doc_mousewheel)
 
         self.doc_canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.doc_canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.doc_canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.doc_canvas.bind("<Motion>", self._on_canvas_motion)
+        self.doc_canvas.bind("<Leave>", self._on_canvas_leave)
+        self.doc_canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
+        self.after_idle(self._layout_content_viewport)
+
+        self.help_panel = tk.Frame(workspace, bg=BG)
+        self.help_panel.grid(
+            row=1, column=0, sticky="nsew", padx=32, pady=(10, 26)
+        )
+        self.help_panel.grid_columnconfigure(0, weight=1)
+        self.help_panel.grid_rowconfigure(0, weight=1)
+
+        card = tk.Frame(self.help_panel, bg=PANEL_BG, padx=28, pady=22)
+        card.grid(row=0, column=0, sticky="nsew")
+        card.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            card,
+            text="Hướng dẫn phím tắt",
+            font=self.font_brand,
+            fg=TEXT,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            card,
+            text="Nhấn F1 để mở hoặc đóng tab này.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 18))
+
+        table = tk.Frame(card, bg=PANEL_BG)
+        table.grid(row=2, column=0, sticky="nw")
+        for row, (keys, description) in enumerate(SHORTCUTS):
+            tk.Label(
+                table,
+                text=keys,
+                font=("Consolas", 10, "bold"),
+                fg=TEXT,
+                bg="#0b1220",
+                anchor="w",
+                width=18,
+                padx=10,
+                pady=3,
+            ).grid(row=row, column=0, sticky="w", pady=3)
+            tk.Label(
+                table,
+                text=description,
+                font=self.font_layer,
+                fg=MUTED,
+                bg=PANEL_BG,
+                anchor="w",
+            ).grid(row=row, column=1, sticky="w", padx=(16, 0), pady=3)
+        self.help_panel.grid_remove()
+
+    def _show_help_tab(self, _event=None):
+        if self.help_visible:
+            return
+        self._commit_text_editor()
+        self.help_visible = True
+        self.workspace_wrap.grid_remove()
+        self.help_panel.grid()
+        self.help_tab_label.configure(fg=TEXT, bg=HOVER_BG)
+        self.doc_tab_label.configure(fg=MUTED)
+        self.update_idletasks()
+        self._layout_content_viewport()
+
+    def _hide_help_tab(self, _event=None):
+        if not self.help_visible:
+            return
+        self.help_visible = False
+        self.help_panel.grid_remove()
+        self.workspace_wrap.grid()
+        self.help_tab_label.configure(fg=MUTED, bg=PANEL_BG)
+        self.doc_tab_label.configure(fg=TEXT)
+        self.update_idletasks()
+        self._layout_content_viewport()
+
+    def _toggle_help_tab(self, _event=None):
+        if self.help_visible:
+            self._hide_help_tab()
+        else:
+            self._show_help_tab()
+
+    def _page_pixel_size(self):
+        return (
+            max(round(self.content_width * self.zoom), 1),
+            max(round(self.content_height * self.zoom), 1),
+        )
+
+    def _layout_content_viewport(self, _event=None):
+        if not (
+            self.view_canvas.winfo_exists()
+            and self.hruler.winfo_exists()
+            and self.vruler.winfo_exists()
+        ):
+            return
+        view_w = max(self.view_canvas.winfo_width(), 1)
+        view_h = max(self.view_canvas.winfo_height(), 1)
+        page_w, page_h = self._page_pixel_size()
+        pad = 16
+        bar = 16
+        need_h = page_w > view_w
+        need_v = page_h > view_h
+        if need_h and page_h > view_h - bar:
+            need_v = True
+        if need_v and page_w > view_w - bar:
+            need_h = True
+
+        if need_v:
+            self.vbar.grid()
+        else:
+            self.vbar.grid_remove()
+        if need_h:
+            self.hbar.grid()
+        else:
+            self.hbar.grid_remove()
+
+        avail_w = max(view_w - (bar if need_v else 0), 1)
+        avail_h = max(view_h - (bar if need_h else 0), 1)
+        x = pad if page_w > avail_w else (avail_w - page_w) // 2
+        y = pad if page_h > avail_h else (avail_h - page_h) // 2
+        self.view_canvas.coords(self._doc_window, max(x, 0), max(y, 0))
+        self.view_canvas.configure(
+            scrollregion=(
+                0,
+                0,
+                page_w + pad * 2 if page_w > avail_w else avail_w,
+                page_h + pad * 2 if page_h > avail_h else avail_h,
+            )
+        )
+        self._draw_rulers()
+
+    def _on_view_xscroll(self, first, last):
+        self.hbar.set(first, last)
+        self._draw_hruler()
+
+    def _on_view_yscroll(self, first, last):
+        self.vbar.set(first, last)
+        self._draw_vruler()
+
+    def _draw_rulers(self):
+        if self._doc_window is None:
+            return
+        doc_x, doc_y = self.view_canvas.coords(self._doc_window)
+        self._draw_hruler(doc_x + 1 - self.view_canvas.canvasx(0))
+        self._draw_vruler(doc_y + 1 - self.view_canvas.canvasy(0))
+
+    def _ruler_minor_step(self):
+        for step in RULER_STEPS:
+            if step * self.zoom >= 6:
+                return step
+        return RULER_STEPS[-1]
+
+    def _draw_hruler(self, origin=None):
+        ruler = self.hruler
+        ruler.delete("all")
+        width = ruler.winfo_width()
+        if width <= 1:
+            return
+        if origin is None:
+            doc_x = self.view_canvas.coords(self._doc_window)[0]
+            origin = doc_x + 1 - self.view_canvas.canvasx(0)
+        height = RULER_SIZE
+        zoom = self.zoom
+        step = self._ruler_minor_step()
+        major = step * 10
+        page_end = origin + self.content_width * zoom
+        if page_end > 0 and origin < width:
+            ruler.create_rectangle(
+                max(origin, 0),
+                height - 3,
+                min(page_end, width),
+                height,
+                fill=ACCENT,
+                outline="",
+            )
+        start = int((0 - origin) // (step * zoom)) * step
+        end = int((width - origin) // (step * zoom)) * step
+        for value in range(
+            max(start, 0), min(end, self.content_width) + 1, step
+        ):
+            x = origin + value * zoom
+            if value % major == 0:
+                length = 10
+                ruler.create_text(
+                    x + 3,
+                    2,
+                    text=str(value),
+                    anchor="nw",
+                    fill=MUTED,
+                    font=("Segoe UI", 7),
+                )
+            elif value % (major // 2) == 0:
+                length = 7
+            else:
+                length = 4
+            ruler.create_line(
+                x, height - length, x, height, fill=RULER_TICK
+            )
+
+    def _draw_vruler(self, origin=None):
+        ruler = self.vruler
+        ruler.delete("all")
+        height = ruler.winfo_height()
+        if height <= 1:
+            return
+        if origin is None:
+            doc_y = self.view_canvas.coords(self._doc_window)[1]
+            origin = doc_y + 1 - self.view_canvas.canvasy(0)
+        width = RULER_SIZE
+        zoom = self.zoom
+        step = self._ruler_minor_step()
+        major = step * 10
+        page_end = origin + self.content_height * zoom
+        if page_end > 0 and origin < height:
+            ruler.create_rectangle(
+                width - 3,
+                max(origin, 0),
+                width,
+                min(page_end, height),
+                fill=ACCENT,
+                outline="",
+            )
+        start = int((0 - origin) // (step * zoom)) * step
+        end = int((height - origin) // (step * zoom)) * step
+        for value in range(
+            max(start, 0), min(end, self.content_height) + 1, step
+        ):
+            y = origin + value * zoom
+            if value % major == 0:
+                length = 10
+                ruler.create_text(
+                    width // 2 - 3,
+                    y,
+                    text=str(value),
+                    angle=90,
+                    anchor="center",
+                    fill=MUTED,
+                    font=("Segoe UI", 7),
+                )
+            elif value % (major // 2) == 0:
+                length = 7
+            else:
+                length = 4
+            ruler.create_line(
+                width - length, y, width, y, fill=RULER_TICK
+            )
+
+    def _start_guide_drag(self, orient, event):
+        self._commit_text_editor()
+        self._guide_drag = orient
+        if not self.guides_visible:
+            self.guides_visible = True
+            self._draw_guides()
+        self._update_guide_preview(event)
+
+    def _drag_guide(self, event):
+        self._update_guide_preview(event)
+
+    def _finish_guide_drag(self, event):
+        self.doc_canvas.delete("guide_preview")
+        orient = self._guide_drag
+        self._guide_drag = None
+        if orient is None:
+            return
+        pos = self._guide_pos_from_event(orient, event)
+        if pos is None:
+            return
+        self.guides.append({"orient": orient, "pos": pos})
+        self._draw_guides()
+        self._refresh_doc_tab()
+
+    def _guide_pos_from_event(self, orient, event):
+        if orient == "h":
+            view_x = event.x
+            view_y = event.y - RULER_SIZE
+        else:
+            view_x = event.x - RULER_SIZE
+            view_y = event.y
+        doc_x, doc_y = self.view_canvas.coords(self._doc_window)
+        x = (self.view_canvas.canvasx(view_x) - (doc_x + 1)) / self.zoom
+        y = (self.view_canvas.canvasy(view_y) - (doc_y + 1)) / self.zoom
+        pos, limit = (
+            (y, self.content_height)
+            if orient == "h"
+            else (x, self.content_width)
+        )
+        if 0 <= pos <= limit:
+            return round(pos)
+        return None
+
+    def _update_guide_preview(self, event):
+        if self._guide_drag is None:
+            return
+        self.doc_canvas.delete("guide_preview")
+        pos = self._guide_pos_from_event(self._guide_drag, event)
+        if pos is None:
+            return
+        self._create_guide_line(self._guide_drag, pos, "guide_preview")
+        self.doc_canvas.tag_raise("guide_preview")
+
+    def _create_guide_line(self, orient, pos, tag):
+        options = {
+            "fill": GUIDE_COLOR,
+            "width": 1,
+            "tags": tag,
+        }
+        if tag == "guide_preview":
+            options["dash"] = (4, 3)
+        zoom = self.zoom
+        page_w, page_h = self._page_pixel_size()
+        if orient == "h":
+            self.doc_canvas.create_line(
+                0, pos * zoom, page_w, pos * zoom, **options
+            )
+        else:
+            self.doc_canvas.create_line(
+                pos * zoom, 0, pos * zoom, page_h, **options
+            )
+
+    def _draw_guides(self):
+        self.doc_canvas.delete("guide")
+        if not self.guides_visible:
+            return
+        for guide in self.guides:
+            self._create_guide_line(
+                guide["orient"], guide["pos"], "guide"
+            )
+
+    def _toggle_guides(self, _event=None):
+        self.guides_visible = not self.guides_visible
+        self._draw_guides()
+        if not self.guides_visible:
+            self.doc_canvas.configure(cursor="pencil")
+        return "break"
+
+    def _guide_at(self, x, y, tolerance=4):
+        if not self.guides_visible:
+            return None
+        found = None
+        best = tolerance + 1
+        for guide in self.guides:
+            distance = abs(
+                (y if guide["orient"] == "h" else x) - guide["pos"]
+            )
+            if distance <= tolerance and distance < best:
+                found = guide
+                best = distance
+        return found
+
+    def _guide_cursor(self, guide):
+        if guide is None:
+            return "pencil"
+        return (
+            "sb_v_double_arrow"
+            if guide["orient"] == "h"
+            else "sb_h_double_arrow"
+        )
+
+    def _on_canvas_motion(self, event):
+        event = _DocEvent(event, self.zoom)
+        guide = (
+            self._guide_at(event.x, event.y)
+            if self.active_tool_id == "move"
+            else None
+        )
+        cursor = self._guide_cursor(guide)
+        if self.doc_canvas.cget("cursor") != cursor:
+            self.doc_canvas.configure(cursor=cursor)
+
+    def _on_canvas_leave(self, _event=None):
+        if self._moving_guide is not None:
+            return
+        self.doc_canvas.configure(cursor="pencil")
+
+    def _move_guide_to(self, pos):
+        guide = self._moving_guide
+        limit = (
+            self.content_height
+            if guide["orient"] == "h"
+            else self.content_width
+        )
+        guide["pos"] = round(max(0, min(pos, limit)))
+        self._draw_guides()
+
+    def _on_doc_mousewheel(self, event):
+        if event.state & 0x0004:
+            if event.delta:
+                self._zoom_by(1 if event.delta > 0 else -1, event)
+            return "break"
+        step = -1 if event.delta > 0 else 1
+        if event.state & 0x0001:
+            self.view_canvas.xview_scroll(step, "units")
+        else:
+            self.view_canvas.yview_scroll(step, "units")
+        return "break"
+
+    def _zoom_anchor(self):
+        view = self.view_canvas
+        vx = view.winfo_pointerx() - view.winfo_rootx()
+        vy = view.winfo_pointery() - view.winfo_rooty()
+        if not (0 <= vx < view.winfo_width() and 0 <= vy < view.winfo_height()):
+            return None
+        doc_x, doc_y = view.coords(self._doc_window)
+        return (
+            vx,
+            vy,
+            (view.canvasx(vx) - (doc_x + 1)) / self.zoom,
+            (view.canvasy(vy) - (doc_y + 1)) / self.zoom,
+        )
+
+    def _restore_zoom_anchor(self, anchor):
+        if anchor is None:
+            return
+        vx, vy, doc_x_units, doc_y_units = anchor
+        view = self.view_canvas
+        view.update_idletasks()
+        page_w, page_h = self._page_pixel_size()
+        doc_x, doc_y = view.coords(self._doc_window)
+        if page_w > view.winfo_width():
+            target = doc_x + 1 + doc_x_units * self.zoom - vx
+            span = max(page_w + 32 - view.winfo_width(), 1)
+            view.xview_moveto(max(0.0, min(1.0, target / span)))
+        if page_h > view.winfo_height():
+            target = doc_y + 1 + doc_y_units * self.zoom - vy
+            span = max(page_h + 32 - view.winfo_height(), 1)
+            view.yview_moveto(max(0.0, min(1.0, target / span)))
+
+    def _zoom_by(self, direction, event=None):
+        try:
+            index = ZOOM_STEPS.index(self.zoom)
+        except ValueError:
+            index = min(
+                range(len(ZOOM_STEPS)),
+                key=lambda i: abs(ZOOM_STEPS[i] - self.zoom),
+            )
+        index = max(0, min(len(ZOOM_STEPS) - 1, index + direction))
+        zoom = ZOOM_STEPS[index]
+        if zoom == self.zoom:
+            return "break"
+        if self._text_editor is not None:
+            self._commit_text_editor()
+        anchor = self._zoom_anchor()
+        self.zoom = zoom
+        self.doc_canvas.configure(
+            width=self._page_pixel_size()[0],
+            height=self._page_pixel_size()[1],
+        )
+        self._render_document()
+        self._layout_content_viewport()
+        self._restore_zoom_anchor(anchor)
+        self._update_status()
+        return "break"
+
+    def _update_content_size_label(self):
+        label = (
+            f"Kích thước nội dung: "
+            f"{self.content_width} × {self.content_height}"
+        )
+        if self.content_full:
+            label += " (Full)"
+        self.content_size_button.configure(text=label)
+
+    def _set_content_size(self, width, height):
+        self.content_width = width
+        self.content_height = height
+        self.guides = [
+            guide
+            for guide in self.guides
+            if 0
+            <= guide["pos"]
+            <= (
+                self.content_height
+                if guide["orient"] == "h"
+                else self.content_width
+            )
+        ]
+        self.doc_canvas.configure(
+            width=self._page_pixel_size()[0],
+            height=self._page_pixel_size()[1],
+        )
+        self._draw_guides()
+        self._layout_content_viewport()
+        self._update_content_size_label()
+        self._refresh_doc_tab()
+
+    def _open_content_size_dialog(self):
+        self._commit_text_editor()
+        window = self._content_size_window
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_force()
+            return
+
+        window = tk.Toplevel(self)
+        self._content_size_window = window
+        window.title("Kích thước nội dung")
+        window.configure(bg=PANEL_BG)
+        window.resizable(False, False)
+        window.transient(self)
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._close_content_size_dialog(window),
+        )
+        window.bind(
+            "<Escape>", lambda _e: self._close_content_size_dialog(window)
+        )
+
+        body = tk.Frame(window, bg=PANEL_BG, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="Kích thước nội dung",
+            font=self.font_brand,
+            fg=TEXT,
+            bg=PANEL_BG,
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="Kích thước khung thiết kế, tính bằng pixel.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(anchor="w", pady=(4, 14))
+
+        form = tk.Frame(body, bg=PANEL_BG)
+        form.pack(fill="x")
+        form.grid_columnconfigure(1, weight=1)
+
+        entries = {}
+        full_var = tk.BooleanVar(window, value=self.content_full)
+        for row, (key, title, value) in enumerate(
+            (
+                ("width", "Chiều rộng", self.content_width),
+                ("height", "Chiều cao", self.content_height),
+            )
+        ):
+            tk.Label(
+                form,
+                text=title,
+                font=("Segoe UI", 10),
+                fg=TEXT,
+                bg=PANEL_BG,
+                anchor="w",
+            ).grid(row=row, column=0, sticky="w", pady=4)
+            entry = self._make_info_entry(form, width=8)
+            entry.configure(justify="center", font=self.font_layer)
+            entry.insert(0, str(value))
+            entry.grid(row=row, column=1, sticky="e", pady=4)
+            tk.Label(
+                form,
+                text="px",
+                font=("Segoe UI", 9),
+                fg=MUTED,
+                bg=PANEL_BG,
+            ).grid(row=row, column=2, sticky="w", padx=(6, 0))
+            entry.bind(
+                "<Return>",
+                lambda _e: self._apply_content_size(
+                    window, entries["width"], entries["height"], full_var
+                ),
+            )
+            entries[key] = entry
+
+        tk.Checkbutton(
+            form,
+            text="Full",
+            variable=full_var,
+            font=("Segoe UI", 10),
+            fg=TEXT,
+            bg=PANEL_BG,
+            activebackground=PANEL_BG,
+            activeforeground=TEXT,
+            selectcolor="#0b1220",
+            highlightthickness=0,
+            bd=0,
+            anchor="w",
+            cursor="hand2",
+        ).grid(row=2, column=0, sticky="w", pady=(10, 0))
+        tk.Label(
+            form,
+            text="Body full — không đặt width/height khi xuất HTML.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(
+            row=2, column=1, columnspan=2, sticky="w", pady=(10, 0)
+        )
+
+        actions = tk.Frame(body, bg=PANEL_BG)
+        actions.pack(fill="x", pady=(16, 0))
+
+        tk.Button(
+            actions,
+            text="Hủy",
+            command=lambda: self._close_content_size_dialog(window),
+            font=self.font_menu,
+            fg=TEXT,
+            bg=BORDER,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right")
+
+        tk.Button(
+            actions,
+            text="Áp dụng",
+            command=lambda: self._apply_content_size(
+                window, entries["width"], entries["height"], full_var
+            ),
+            font=self.font_menu,
+            fg=BG,
+            bg=ACCENT,
+            activebackground="#60a5fa",
+            activeforeground=BG,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right", padx=(0, 8))
+
+        window.update_idletasks()
+        width = window.winfo_reqwidth()
+        height = window.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 3
+        window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        entries["width"].focus_set()
+        entries["width"].select_range(0, "end")
+
+    def _apply_content_size(
+        self, window, width_entry, height_entry, full_var
+    ):
+        try:
+            width = int(width_entry.get().strip())
+            height = int(height_entry.get().strip())
+        except ValueError:
+            messagebox.showwarning(
+                "Kích thước nội dung",
+                "Vui lòng nhập số nguyên cho chiều rộng và chiều cao.",
+                parent=window,
+            )
+            return
+        if not (
+            100 <= width <= 6000
+            and 100 <= height <= 6000
+        ):
+            messagebox.showwarning(
+                "Kích thước nội dung",
+                "Chiều rộng và chiều cao phải trong khoảng 100–6000 px.",
+                parent=window,
+            )
+            return
+        self._close_content_size_dialog(window)
+        self.content_full = bool(full_var.get())
+        self._set_content_size(width, height)
+
+    def _close_content_size_dialog(self, window):
+        if window is not None and window.winfo_exists():
+            window.destroy()
+        if self._content_size_window is window:
+            self._content_size_window = None
 
     def _build_layer_panel(self):
         panel = tk.Frame(self, bg=PANEL_BG, width=LAYER_PANEL_WIDTH)
         panel.grid(row=1, column=2, sticky="ns")
         panel.grid_propagate(False)
+        panel.pack_propagate(False)
 
         border = tk.Frame(panel, bg=BORDER, width=1)
         border.pack(side="left", fill="y")
@@ -479,6 +1394,7 @@ class App(tk.Tk):
         inner = tk.Frame(panel, bg=PANEL_BG)
         inner.pack(side="left", fill="both", expand=True)
 
+        self._build_page_section(inner)
         self._build_info_section(inner)
 
         header = tk.Frame(inner, bg=PANEL_BG)
@@ -514,12 +1430,12 @@ class App(tk.Tk):
         )
         self.layer_count_label.pack(fill="x", side="bottom")
 
-    def _build_info_section(self, parent):
+    def _build_page_section(self, parent):
         header = tk.Frame(parent, bg=PANEL_BG)
         header.pack(fill="x", padx=14, pady=(14, 8))
         tk.Label(
             header,
-            text="THÔNG TIN HÌNH",
+            text="TRANG",
             font=self.font_panel,
             fg=MUTED,
             bg=PANEL_BG,
@@ -530,9 +1446,83 @@ class App(tk.Tk):
         body.pack(fill="x", padx=14, pady=(8, 10))
         body.grid_columnconfigure(1, weight=1)
 
-        self._info_label(body, 0, "Kích thước")
+        self._info_label(body, 0, "Font chữ body")
+        holder = tk.Frame(body, bg=PANEL_BG)
+        holder.grid(row=0, column=1, sticky="ew", pady=2)
+        self.body_font_family_var = tk.StringVar(value=self.body_font_family)
+        self.body_font_family_entry = self._make_info_entry(holder, width=1)
+        self.body_font_family_entry.configure(
+            textvariable=self.body_font_family_var,
+            justify="left",
+        )
+        self.body_font_family_entry.pack(side="left", fill="x", expand=True)
+        self.body_font_family_arrow = tk.Label(
+            holder,
+            text="▾",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg="#0b1220",
+            padx=5,
+            cursor="hand2",
+        )
+        self.body_font_family_arrow.pack(side="left", fill="y")
+        self.body_font_family_entry.bind(
+            "<FocusIn>",
+            lambda _e: self._set_font_entry_active(
+                self.body_font_family_entry
+            ),
+        )
+        self.body_font_family_entry.bind(
+            "<KeyRelease>",
+            lambda event: self._update_font_suggestions(
+                event, self.body_font_family_entry
+            ),
+        )
+        self.body_font_family_entry.bind(
+            "<Return>",
+            lambda event: self._apply_font_field(
+                event, self.body_font_family_entry
+            ),
+        )
+        self.body_font_family_entry.bind("<Down>", self._font_suggest_down)
+        self.body_font_family_entry.bind("<Up>", self._font_suggest_up)
+        self.body_font_family_entry.bind(
+            "<Escape>", self._hide_font_suggestions
+        )
+        self.body_font_family_entry.bind(
+            "<FocusOut>", self._on_font_focus_out
+        )
+        self.body_font_family_arrow.bind(
+            "<ButtonPress-1>",
+            lambda _e: self._toggle_font_suggestions(
+                entry=self.body_font_family_entry
+            ),
+        )
+
+    def _build_info_section(self, parent):
+        header = tk.Frame(parent, bg=PANEL_BG)
+        header.pack(fill="x", padx=14, pady=(14, 8))
+        self.info_title = tk.Label(
+            header,
+            text="THÔNG TIN HÌNH",
+            font=self.font_panel,
+            fg=MUTED,
+            bg=PANEL_BG,
+        )
+        self.info_title.pack(side="left")
+        tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=12)
+
+        body = tk.Frame(parent, bg=PANEL_BG)
+        body.pack(fill="x", padx=14, pady=(8, 10))
+        body.grid_columnconfigure(1, weight=1)
+
+        self.info_shape_rows = []
+        self.info_text_rows = []
+
+        label = self._info_label(body, 0, "Kích thước")
         size_holder = tk.Frame(body, bg=PANEL_BG)
         size_holder.grid(row=0, column=1, sticky="e", pady=2)
+        self.info_shape_rows.extend((label, size_holder))
         self.info_width_entry = self._make_info_entry(size_holder)
         self.info_width_entry.pack(side="left")
         tk.Label(
@@ -545,9 +1535,10 @@ class App(tk.Tk):
             size_holder, text="px", font=("Segoe UI", 9), fg=MUTED, bg=PANEL_BG,
         ).pack(side="left", padx=(4, 0))
 
-        self._info_label(body, 1, "Độ dày viền")
+        label = self._info_label(body, 1, "Độ dày viền")
         border_holder = tk.Frame(body, bg=PANEL_BG)
         border_holder.grid(row=1, column=1, sticky="e", pady=2)
+        self.info_shape_rows.extend((label, border_holder))
         self.info_border_entry = self._make_info_entry(border_holder)
         self.info_border_entry.pack(side="left")
         tk.Label(
@@ -555,9 +1546,10 @@ class App(tk.Tk):
             bg=PANEL_BG,
         ).pack(side="left", padx=(4, 0))
 
-        self._info_label(body, 2, "Màu viền")
+        label = self._info_label(body, 2, "Màu viền")
         border_color_holder = tk.Frame(body, bg=PANEL_BG)
         border_color_holder.grid(row=2, column=1, sticky="e", pady=2)
+        self.info_shape_rows.extend((label, border_color_holder))
         self.info_border_swatch = tk.Canvas(
             border_color_holder, width=14, height=14, bg=PANEL_BG,
             highlightthickness=0, cursor="hand2",
@@ -575,9 +1567,10 @@ class App(tk.Tk):
             "<FocusOut>", self._apply_border_color_text
         )
 
-        self._info_label(body, 3, "Nền")
+        label = self._info_label(body, 3, "Nền")
         bg_holder = tk.Frame(body, bg=PANEL_BG)
         bg_holder.grid(row=3, column=1, sticky="e", pady=2)
+        self.info_shape_rows.extend((label, bg_holder))
         self.info_bg_swatch = tk.Canvas(
             bg_holder, width=14, height=14, bg=PANEL_BG,
             highlightthickness=0, cursor="hand2",
@@ -605,23 +1598,413 @@ class App(tk.Tk):
             ),
         )
 
+        label = self._info_label(body, 4, "Ảnh nền")
+        bg_image_holder = tk.Frame(body, bg=PANEL_BG)
+        bg_image_holder.grid(row=4, column=1, sticky="e", pady=2)
+        self.info_shape_rows.extend((label, bg_image_holder))
+        self.info_bg_image_rows = (label, bg_image_holder)
+        self.info_bg_image_name = tk.Label(
+            bg_image_holder,
+            text="Chọn ảnh",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg="#0b1220",
+            anchor="w",
+            padx=6,
+            pady=2,
+            width=14,
+            cursor="hand2",
+        )
+        self.info_bg_image_name.pack(side="left")
+        self.info_bg_image_clear = tk.Label(
+            bg_image_holder, text="×", font=("Segoe UI", 9, "bold"),
+            fg=MUTED, bg=PANEL_BG, cursor="hand2", padx=4,
+        )
+        self.info_bg_image_clear.pack(side="left")
+        self.info_bg_image_name.bind(
+            "<Button-1>", self._choose_layer_background_image
+        )
+        self.info_bg_image_clear.bind(
+            "<Button-1>", self._clear_layer_background_image
+        )
+        for button in (self.info_bg_image_name, self.info_bg_image_clear):
+            button.bind(
+                "<Enter>", lambda _e, w=button: w.configure(fg=TEXT)
+            )
+            button.bind(
+                "<Leave>",
+                lambda _e: self._refresh_bg_image_row(self.active_layer),
+            )
+
+        self.info_bg_option_rows = []
+        self.info_bg_size_var = tk.StringVar(value="cover")
+        self.info_bg_position_var = tk.StringVar(value="center")
+        self.info_bg_repeat_var = tk.StringVar(value="no-repeat")
+        for row, title, key, variable, values in (
+            (5, "Cỡ nền", "size", self.info_bg_size_var,
+             ("cover", "contain")),
+            (6, "Vị trí", "position", self.info_bg_position_var,
+             ("center", "top", "left", "right")),
+            (7, "Lặp nền", "repeat", self.info_bg_repeat_var,
+             ("repeat", "no-repeat")),
+        ):
+            label = self._info_label(body, row, title)
+            holder = tk.Frame(body, bg=PANEL_BG)
+            holder.grid(row=row, column=1, sticky="e", pady=2)
+            menu = self._make_info_menu(
+                holder,
+                variable,
+                values,
+                lambda value, key=key: self._apply_layer_background_option(
+                    key, value
+                ),
+            )
+            menu.pack(side="left")
+            label.grid_remove()
+            holder.grid_remove()
+            self.info_bg_option_rows.extend((label, holder))
+
+        label = self._info_label(body, 8, "Display")
+        display_holder = tk.Frame(body, bg=PANEL_BG)
+        display_holder.grid(row=8, column=1, sticky="e", pady=2)
+        self.info_group_rows = (label, display_holder)
+        self.info_group_display_var = tk.StringVar(value="block")
+        self.info_group_display_menu = self._make_info_menu(
+            display_holder,
+            self.info_group_display_var,
+            GROUP_DISPLAYS,
+            self._apply_layer_display,
+        )
+        self.info_group_display_menu.pack(side="left")
+        label.grid_remove()
+        display_holder.grid_remove()
+
+        label = self._info_label(body, 9, "Canh lề")
+        align_holder = tk.Frame(body, bg=PANEL_BG)
+        align_holder.grid(row=9, column=1, sticky="e", pady=2)
+        self.info_group_align_rows = (label, align_holder)
+        self.info_group_align_var = tk.StringVar(value="left")
+        for value, text in (
+            ("left", "Trái"),
+            ("center", "Giữa"),
+            ("right", "Phải"),
+        ):
+            button = tk.Radiobutton(
+                align_holder,
+                text=text,
+                value=value,
+                variable=self.info_group_align_var,
+                command=lambda value=value: self._apply_group_align(value),
+                indicatoron=False,
+                font=("Segoe UI", 9),
+                fg=TEXT,
+                bg="#0b1220",
+                activebackground=HOVER_BG,
+                activeforeground=TEXT,
+                selectcolor=ACCENT,
+                relief="flat",
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                padx=4,
+                pady=2,
+                width=4,
+                cursor="hand2",
+            )
+            button.pack(side="left", padx=(0, 2))
+        label.grid_remove()
+        align_holder.grid_remove()
+
+        label = self._info_label(body, 10, "Justify")
+        justify_holder = tk.Frame(body, bg=PANEL_BG)
+        justify_holder.grid(row=10, column=1, sticky="e", pady=2)
+        self.info_group_justify_rows = (label, justify_holder)
+        self.info_group_justify_var = tk.StringVar(value="left")
+        self.info_group_justify_menu = self._make_info_menu(
+            justify_holder,
+            self.info_group_justify_var,
+            GROUP_JUSTIFIES,
+            self._apply_group_justify,
+        )
+        self.info_group_justify_menu.pack(side="left")
+        label.grid_remove()
+        justify_holder.grid_remove()
+
+        label = self._info_label(body, 11, "Gap")
+        gap_holder = tk.Frame(body, bg=PANEL_BG)
+        gap_holder.grid(row=11, column=1, sticky="e", pady=2)
+        self.info_group_gap_rows = (label, gap_holder)
+        self.info_group_gap_entry = self._make_info_entry(gap_holder)
+        self.info_group_gap_entry.pack(side="left")
+        tk.Label(
+            gap_holder, text="px", font=("Segoe UI", 9), fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(side="left", padx=(4, 0))
+        self.info_group_gap_entry.bind("<Return>", self._apply_group_gap)
+        self.info_group_gap_entry.bind("<FocusOut>", self._apply_group_gap)
+        label.grid_remove()
+        gap_holder.grid_remove()
+
         for entry in (self.info_width_entry, self.info_height_entry):
             entry.bind("<Return>", self._apply_rect_size)
             entry.bind("<FocusOut>", self._apply_rect_size)
         self.info_border_entry.bind("<Return>", self._apply_border_width)
         self.info_border_entry.bind("<FocusOut>", self._apply_border_width)
 
+        label = self._info_label(body, 0, "Font chữ")
+        family_holder = tk.Frame(body, bg=PANEL_BG)
+        family_holder.grid(row=0, column=1, sticky="ew", pady=2)
+        self.info_text_rows.extend((label, family_holder))
+        self.info_font_family_var = tk.StringVar(value="none")
+        self.info_font_family_entry = self._make_info_entry(
+            family_holder, width=1
+        )
+        self.info_font_family_entry.configure(
+            textvariable=self.info_font_family_var,
+            justify="left",
+        )
+        self.info_font_family_entry.pack(
+            side="left", fill="x", expand=True
+        )
+        self.info_font_family_arrow = tk.Label(
+            family_holder,
+            text="▾",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg="#0b1220",
+            padx=5,
+            cursor="hand2",
+        )
+        self.info_font_family_arrow.pack(side="left", fill="y")
+        self._font_families = ["none"] + sorted(
+            {
+                name
+                for name in tkfont.families(self)
+                if not name.startswith("@")
+            },
+            key=str.lower,
+        )
+        self._font_suggest = None
+        self._font_suggest_list = None
+        self._font_focus_after = None
+        self.info_font_family_entry.bind(
+            "<FocusIn>",
+            lambda _e: self._set_font_entry_active(
+                self.info_font_family_entry
+            ),
+        )
+        self.info_font_family_entry.bind(
+            "<KeyRelease>", self._update_font_suggestions
+        )
+        self.info_font_family_entry.bind("<Return>", self._apply_font_field)
+        self.info_font_family_entry.bind("<Down>", self._font_suggest_down)
+        self.info_font_family_entry.bind("<Up>", self._font_suggest_up)
+        self.info_font_family_entry.bind(
+            "<Escape>", self._hide_font_suggestions
+        )
+        self.info_font_family_entry.bind(
+            "<FocusOut>", self._on_font_focus_out
+        )
+        self.info_font_family_arrow.bind(
+            "<ButtonPress-1>", self._toggle_font_suggestions
+        )
+
+        label = self._info_label(body, 1, "Cỡ chữ")
+        font_holder = tk.Frame(body, bg=PANEL_BG)
+        font_holder.grid(row=1, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, font_holder))
+        self.info_font_size_entry = self._make_info_entry(font_holder)
+        self.info_font_size_entry.pack(side="left")
+        tk.Label(
+            font_holder, text="px", font=("Segoe UI", 9), fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(side="left", padx=(4, 0))
+
+        label = self._info_label(body, 2, "Màu chữ")
+        text_color_holder = tk.Frame(body, bg=PANEL_BG)
+        text_color_holder.grid(row=2, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, text_color_holder))
+        self.info_text_swatch = tk.Canvas(
+            text_color_holder, width=14, height=14, bg=PANEL_BG,
+            highlightthickness=0, cursor="hand2",
+        )
+        self.info_text_swatch.pack(side="left")
+        self.info_text_color_entry = self._make_info_entry(
+            text_color_holder, width=8
+        )
+        self.info_text_color_entry.pack(side="left", padx=(6, 0))
+        self.info_text_swatch.bind("<Button-1>", self._choose_text_color)
+        self.info_text_color_entry.bind(
+            "<Return>", self._apply_text_color_text
+        )
+        self.info_text_color_entry.bind(
+            "<FocusOut>", self._apply_text_color_text
+        )
+
+        label = self._info_label(body, 3, "Độ đậm")
+        weight_holder = tk.Frame(body, bg=PANEL_BG)
+        weight_holder.grid(row=3, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, weight_holder))
+        self.info_weight_var = tk.StringVar(value="400")
+        self.info_weight_menu = tk.OptionMenu(
+            weight_holder,
+            self.info_weight_var,
+            *[str(value) for value in range(100, 1000, 100)],
+            command=lambda _value: self._apply_text_style(),
+        )
+        self.info_weight_menu.configure(
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            relief="flat",
+            bd=0,
+            width=6,
+            anchor="center",
+            cursor="hand2",
+        )
+        self.info_weight_menu["menu"].configure(
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            activebackground=ACCENT,
+            activeforeground=BG,
+            tearoff=0,
+        )
+        self.info_weight_menu.pack(side="left")
+
+        label = self._info_label(body, 4, "Giãn dòng")
+        line_holder = tk.Frame(body, bg=PANEL_BG)
+        line_holder.grid(row=4, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, line_holder))
+        self.info_line_height_entry = self._make_info_entry(line_holder)
+        self.info_line_height_entry.pack(side="left")
+
+        label = self._info_label(body, 5, "Giãn chữ")
+        spacing_holder = tk.Frame(body, bg=PANEL_BG)
+        spacing_holder.grid(row=5, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, spacing_holder))
+        self.info_letter_spacing_entry = self._make_info_entry(spacing_holder)
+        self.info_letter_spacing_entry.pack(side="left")
+        tk.Label(
+            spacing_holder, text="px", font=("Segoe UI", 9), fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(side="left", padx=(4, 0))
+
+        label = self._info_label(body, 6, "Chữ hoa")
+        transform_holder = tk.Frame(body, bg=PANEL_BG)
+        transform_holder.grid(row=6, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, transform_holder))
+        self.info_transform_var = tk.StringVar(value="none")
+        self.info_transform_menu = tk.OptionMenu(
+            transform_holder,
+            self.info_transform_var,
+            *("none", "uppercase"),
+            command=lambda _value: self._apply_text_style(),
+        )
+        self.info_transform_menu.configure(
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            relief="flat",
+            bd=0,
+            width=10,
+            anchor="center",
+            cursor="hand2",
+        )
+        self.info_transform_menu["menu"].configure(
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            activebackground=ACCENT,
+            activeforeground=BG,
+            tearoff=0,
+        )
+        self.info_transform_menu.pack(side="left")
+
+        label = self._info_label(body, 7, "Canh lề")
+        align_holder = tk.Frame(body, bg=PANEL_BG)
+        align_holder.grid(row=7, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, align_holder))
+        self.info_align_var = tk.StringVar(value="left")
+        for value, text in (
+            ("left", "Trái"),
+            ("center", "Giữa"),
+            ("right", "Phải"),
+        ):
+            button = tk.Radiobutton(
+                align_holder,
+                text=text,
+                value=value,
+                variable=self.info_align_var,
+                indicatoron=False,
+                font=("Segoe UI", 9),
+                fg=TEXT,
+                bg="#0b1220",
+                activebackground=HOVER_BG,
+                activeforeground=TEXT,
+                selectcolor=ACCENT,
+                relief="flat",
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                padx=4,
+                pady=2,
+                width=4,
+                cursor="hand2",
+            )
+            button.bind(
+                "<Button-1>",
+                lambda _event, value=value: self._on_align_click(value),
+            )
+            button.bind("<ButtonRelease-1>", lambda _event: "break")
+            button.pack(side="left", padx=(0, 2))
+
+        label = self._info_label(body, 8, "Thẻ")
+        tag_holder = tk.Frame(body, bg=PANEL_BG)
+        tag_holder.grid(row=8, column=1, sticky="e", pady=2)
+        self.info_text_rows.extend((label, tag_holder))
+        self.info_tag_var = tk.StringVar(value="p")
+        self.info_tag_menu = self._make_info_menu(
+            tag_holder,
+            self.info_tag_var,
+            TEXT_TAGS,
+            lambda _value: self._apply_text_style(),
+            width=6,
+        )
+        self.info_tag_menu.pack(side="left")
+
+        for entry in (self.info_font_size_entry,
+                      self.info_line_height_entry,
+                      self.info_letter_spacing_entry):
+            entry.bind("<Return>", self._apply_text_style)
+            entry.bind("<FocusOut>", self._apply_text_style)
+
+        for widget in self.info_text_rows:
+            widget.grid_remove()
+
         tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=12)
 
     def _info_label(self, parent, row, title):
-        tk.Label(
+        label = tk.Label(
             parent,
             text=title,
             font=("Segoe UI", 9),
             fg=MUTED,
             bg=PANEL_BG,
             anchor="w",
-        ).grid(row=row, column=0, sticky="w", pady=2)
+        )
+        label.grid(row=row, column=0, sticky="w", pady=2)
+        return label
 
     def _make_info_entry(self, parent, width=4):
         return tk.Entry(
@@ -640,50 +2023,623 @@ class App(tk.Tk):
             highlightcolor=ACCENT,
         )
 
+    def _make_info_menu(self, parent, variable, values, command, width=9):
+        menu = tk.OptionMenu(parent, variable, *values, command=command)
+        menu.configure(
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            relief="flat",
+            bd=0,
+            width=width,
+            anchor="center",
+            cursor="hand2",
+        )
+        menu["menu"].configure(
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            activebackground=ACCENT,
+            activeforeground=BG,
+            tearoff=0,
+        )
+        return menu
+
     def _active_rect(self):
         if self.active_layer is None:
             return None
-        rects = [r for r in self.active_layer.items if r.get("type") == "rect"]
+        rects = [
+            record
+            for record in self.active_layer.items
+            if record.get("type") in ("rect", "ellipse")
+        ]
         return rects[-1] if rects else None
 
+    def _active_image(self):
+        if self.active_layer is None:
+            return None
+        images = [r for r in self.active_layer.items if r.get("type") == "image"]
+        return images[-1] if images else None
+
+    def _active_shape(self):
+        return self._active_rect() or self._active_image()
+
+    def _active_text(self):
+        if self.active_layer is None:
+            return None
+        texts = [r for r in self.active_layer.items if r.get("type") == "text"]
+        return texts[-1] if texts else None
+
+    def _can_have_layer_background(self, layer):
+        if layer is None:
+            return False
+        if layer.children:
+            return True
+        return not (
+            self._is_text_layer(layer)
+            or self._is_image_layer(layer)
+            or self._is_shape_layer(layer)
+        )
+
+    def _refresh_bg_image_row(self, layer):
+        image = layer.background_image if layer is not None else None
+        name = str(image.get("name") or "") if image else ""
+        label = name if name else "Chọn ảnh"
+        if len(label) > 14:
+            label = label[:13] + "…"
+        self.info_bg_image_name.configure(
+            text=label, fg=TEXT if image else MUTED
+        )
+        self.info_bg_image_clear.configure(fg=TEXT if image else MUTED)
+
+    def _background_setting(self, image, key):
+        allowed = {
+            "size": ("cover", "contain"),
+            "position": ("center", "top", "left", "right"),
+            "repeat": ("repeat", "no-repeat"),
+        }
+        defaults = {"size": "cover", "position": "center",
+                    "repeat": "no-repeat"}
+        value = image.get(key) if isinstance(image, dict) else None
+        return value if value in allowed[key] else defaults[key]
+
+    def _refresh_bg_option_rows(self, image):
+        visible = image is not None
+        for widget in self.info_bg_option_rows:
+            if visible:
+                widget.grid()
+            else:
+                widget.grid_remove()
+        if not visible:
+            return
+        self.info_bg_size_var.set(self._background_setting(image, "size"))
+        self.info_bg_position_var.set(
+            self._background_setting(image, "position")
+        )
+        self.info_bg_repeat_var.set(
+            self._background_setting(image, "repeat")
+        )
+
+    def _apply_layer_background_option(self, key, value):
+        layer = self.active_layer
+        if layer is None or not layer.background_image:
+            return
+        if self._background_setting(layer.background_image, key) == value:
+            return
+        self._push_history()
+        layer.background_image[key] = value
+        self._render_document()
+        self._refresh_doc_tab()
+
+    def _choose_layer_background_image(self, _event=None):
+        layer = self.active_layer
+        if not self._can_have_layer_background(layer):
+            return
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Chọn ảnh nền",
+            filetypes=[
+                ("Hình ảnh", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("Tất cả tệp", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+            data, mime, width, height = self._prepare_image(raw, path)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Lỗi ảnh nền", str(error), parent=self)
+            return
+        self._push_history()
+        layer.background_image = {
+            "data": data,
+            "mime": mime,
+            "width": width,
+            "height": height,
+            "name": os.path.basename(path),
+            "size": "cover",
+            "position": "center",
+            "repeat": "no-repeat",
+        }
+        self._render_document()
+        self._refresh_info()
+        self._refresh_doc_tab()
+
+    def _clear_layer_background_image(self, _event=None):
+        layer = self.active_layer
+        if layer is None or layer.background_image is None:
+            return
+        self._push_history()
+        layer.background_image = None
+        self._render_document()
+        self._refresh_info()
+        self._refresh_doc_tab()
+
+    def _layer_display(self, layer):
+        value = getattr(layer, "display", "block")
+        return value if value in GROUP_DISPLAYS else "block"
+
+    def _apply_layer_display(self, value):
+        layer = self.active_layer
+        if layer is None or not layer.children:
+            return
+        if value not in GROUP_DISPLAYS or self._layer_display(layer) == value:
+            return
+        self._push_history()
+        layer.display = value
+        self._render_document()
+        self._refresh_info()
+        self._refresh_doc_tab()
+
+    def _layer_align(self, layer):
+        value = getattr(layer, "align", "left")
+        return value if value in GROUP_ALIGNS else "left"
+
+    def _apply_group_align(self, value):
+        layer = self.active_layer
+        if layer is None or not layer.children:
+            return
+        if value not in GROUP_ALIGNS or self._layer_align(layer) == value:
+            return
+        self._push_history()
+        layer.align = value
+        self._refresh_doc_tab()
+
+    def _layer_justify(self, layer):
+        value = getattr(layer, "justify", "left")
+        return value if value in GROUP_JUSTIFIES else "left"
+
+    def _layer_gap(self, layer):
+        value = getattr(layer, "gap", 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        return max(value, 0)
+
+    def _apply_group_justify(self, value):
+        layer = self.active_layer
+        if layer is None or not layer.children:
+            return
+        if value not in GROUP_JUSTIFIES or self._layer_justify(layer) == value:
+            return
+        self._push_history()
+        layer.justify = value
+        self._render_document()
+        self._refresh_doc_tab()
+
+    def _apply_group_gap(self, _event=None):
+        if self._updating_info:
+            return
+        layer = self.active_layer
+        if (
+            layer is None
+            or not layer.children
+            or self._layer_display(layer) not in ("flex", "grid")
+        ):
+            return
+        try:
+            value = max(0, int(self.info_group_gap_entry.get().strip()))
+        except ValueError:
+            self._refresh_info()
+            return
+        if value == self._layer_gap(layer):
+            return
+        self._push_history()
+        layer.gap = value
+        self._render_document()
+        self._refresh_doc_tab()
+
+    def _layer_box_defaults(self):
+        bounds = self._record_bounds(self.active_layer.items)
+        if bounds is None:
+            return 0, 0, 200, 120
+        x1, y1, x2, y2 = (round(value) for value in bounds)
+        if x2 <= x1:
+            x2 = x1 + 200
+        if y2 <= y1:
+            y2 = y1 + 120
+        return x1, y1, x2, y2
+
+    def _ensure_layer_shape(self):
+        x1, y1, x2, y2 = self._layer_box_defaults()
+        rect = {
+            "type": "rect",
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "color": BRUSH_COLOR,
+            "border_color": BRUSH_COLOR,
+            "border_width": 2,
+            "background": "",
+        }
+        self.active_layer.items.insert(0, rect)
+        return rect
+
     def _refresh_info(self):
+        self._hide_font_suggestions()
         rect = self._active_rect()
+        image = self._active_image() if rect is None else None
+        text = self._active_text() if rect is None and image is None else None
+        shape = rect if rect is not None else image
         self._updating_info = True
         try:
-            if rect is None:
-                for entry in (
-                    self.info_width_entry,
-                    self.info_height_entry,
-                    self.info_border_entry,
-                    self.info_border_color_entry,
-                    self.info_bg_entry,
-                ):
-                    entry.configure(state="normal")
-                    entry.delete(0, "end")
-                    entry.configure(state="disabled")
-                self._paint_swatch(self.info_border_swatch, None)
+            self._show_info_rows(text is not None)
+            bg_editable = text is None and self._can_have_layer_background(
+                self.active_layer
+            )
+            for widget in self.info_bg_image_rows:
+                if bg_editable:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            self._refresh_bg_image_row(
+                self.active_layer if bg_editable else None
+            )
+            self._refresh_bg_option_rows(
+                self.active_layer.background_image
+                if bg_editable else None
+            )
+            group = (
+                self.active_layer is not None
+                and bool(self.active_layer.children)
+            )
+            for widget in self.info_group_rows + self.info_group_align_rows:
+                if group:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            flex_group = (
+                group
+                and self._layer_display(self.active_layer) == "flex"
+            )
+            gap_group = (
+                group
+                and self._layer_display(self.active_layer) in ("flex", "grid")
+            )
+            for widget in self.info_group_justify_rows:
+                if flex_group:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            for widget in self.info_group_gap_rows:
+                if gap_group:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            if group:
+                self.info_group_display_var.set(
+                    self._layer_display(self.active_layer)
+                )
+                self.info_group_align_var.set(
+                    self._layer_align(self.active_layer)
+                )
+                self.info_group_justify_var.set(
+                    self._layer_justify(self.active_layer)
+                )
+                self._set_info_entry(
+                    self.info_group_gap_entry,
+                    self._layer_gap(self.active_layer),
+                )
+            if text is not None:
+                self._refresh_text_info(text)
+                return
+            if shape is None:
+                if self.active_layer is None:
+                    for entry in (
+                        self.info_width_entry,
+                        self.info_height_entry,
+                        self.info_border_entry,
+                        self.info_border_color_entry,
+                        self.info_bg_entry,
+                    ):
+                        entry.configure(state="normal")
+                        entry.delete(0, "end")
+                        entry.configure(state="disabled")
+                    self._paint_swatch(self.info_border_swatch, None)
+                    self._paint_swatch(self.info_bg_swatch, None)
+                    self.info_bg_clear.configure(fg=MUTED)
+                    return
+                x1, y1, x2, y2 = self._layer_box_defaults()
+                self._set_info_entry(self.info_width_entry, x2 - x1)
+                self._set_info_entry(self.info_height_entry, y2 - y1)
+                self._set_info_entry(self.info_border_entry, 2)
+                self._set_info_entry(self.info_border_color_entry, BRUSH_COLOR)
+                self._paint_swatch(self.info_border_swatch, BRUSH_COLOR)
+                self.info_bg_entry.configure(state="normal")
+                self.info_bg_entry.delete(0, "end")
                 self._paint_swatch(self.info_bg_swatch, None)
                 self.info_bg_clear.configure(fg=MUTED)
                 return
 
-            width = round(abs(rect["x2"] - rect["x1"]))
-            height = round(abs(rect["y2"] - rect["y1"]))
-            border_width = rect.get("border_width", 2)
-            border_color = (
-                rect.get("border_color") or rect.get("color") or BRUSH_COLOR
-            )
-            background = rect.get("background") or ""
+            if rect is not None:
+                width = round(abs(rect["x2"] - rect["x1"]))
+                height = round(abs(rect["y2"] - rect["y1"]))
+                border_width = rect.get("border_width", 2)
+                border_color = (
+                    rect.get("border_color") or rect.get("color") or BRUSH_COLOR
+                )
+                background = rect.get("background") or ""
+            else:
+                width = round(image.get("width", 1))
+                height = round(image.get("height", 1))
+                border_width = image.get("border_width", 0)
+                border_color = image.get("border_color") or BRUSH_COLOR
+                background = ""
 
             self._set_info_entry(self.info_width_entry, width)
             self._set_info_entry(self.info_height_entry, height)
             self._set_info_entry(self.info_border_entry, border_width)
             self._set_info_entry(self.info_border_color_entry, border_color)
             self._paint_swatch(self.info_border_swatch, border_color)
-            self._set_info_entry(self.info_bg_entry, background)
-            self._paint_swatch(self.info_bg_swatch, background or None)
-            self.info_bg_clear.configure(fg=TEXT if background else MUTED)
+            if rect is not None:
+                self._set_info_entry(self.info_bg_entry, background)
+                self._paint_swatch(self.info_bg_swatch, background or None)
+                self.info_bg_clear.configure(fg=TEXT if background else MUTED)
+            else:
+                self.info_bg_entry.configure(state="normal")
+                self.info_bg_entry.delete(0, "end")
+                self.info_bg_entry.configure(state="disabled")
+                self._paint_swatch(self.info_bg_swatch, None)
+                self.info_bg_clear.configure(fg=MUTED)
         finally:
             self._updating_info = False
+
+    def _show_info_rows(self, show_text):
+        self.info_title.configure(
+            text="THÔNG TIN VĂN BẢN" if show_text else "THÔNG TIN HÌNH"
+        )
+        for widget in self.info_shape_rows:
+            if show_text:
+                widget.grid_remove()
+            else:
+                widget.grid()
+        for widget in self.info_text_rows:
+            if show_text:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def _refresh_text_info(self, text):
+        color = text.get("color") or TEXT
+        self.info_font_family_var.set(self._text_family(text))
+        self._set_info_entry(
+            self.info_font_size_entry, text.get("font_size", 14)
+        )
+        self._set_info_entry(self.info_text_color_entry, color)
+        self._paint_swatch(self.info_text_swatch, color)
+        self.info_weight_var.set(str(self._text_weight_value(text)))
+        self._set_info_entry(
+            self.info_line_height_entry, text.get("line_height", 1.4)
+        )
+        self._set_info_entry(
+            self.info_letter_spacing_entry, text.get("letter_spacing", 0)
+        )
+        self.info_transform_var.set(self._text_transform(text))
+        align = self._text_align_state(text)
+        self.info_align_var.set("" if align == "none" else align)
+        self.info_tag_var.set(self._text_tag(text))
+
+    def _font_matches(self, text):
+        query = text.strip().lower()
+        if not query:
+            return list(self._font_families)
+        matches = [
+            name for name in self._font_families if query in name.lower()
+        ]
+        matches.sort(
+            key=lambda name: (
+                not name.lower().startswith(query),
+                name.lower(),
+            )
+        )
+        return matches
+
+    def _font_suggest_widgets(self):
+        top = self._font_suggest
+        if top is not None and top.winfo_exists():
+            return top, self._font_suggest_list
+        top = tk.Toplevel(self)
+        top.wm_overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.withdraw()
+        listbox = tk.Listbox(
+            top,
+            font=("Segoe UI", 9),
+            bg="#0b1220",
+            fg=TEXT,
+            selectbackground=ACCENT,
+            selectforeground=BG,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            relief="flat",
+            bd=0,
+            activestyle="none",
+            exportselection=False,
+        )
+        listbox.pack(fill="both", expand=True)
+        listbox.bind("<ButtonRelease-1>", self._pick_font_suggestion)
+        self._font_suggest = top
+        self._font_suggest_list = listbox
+        return top, listbox
+
+    def _font_entry_spec(self, entry=None):
+        entry = entry or self.info_font_family_entry
+        if entry is getattr(self, "body_font_family_entry", None):
+            return (
+                entry,
+                self.body_font_family_var,
+                self.body_font_family_arrow,
+                self._apply_body_font,
+            )
+        return (
+            entry,
+            self.info_font_family_var,
+            self.info_font_family_arrow,
+            self._apply_text_style,
+        )
+
+    def _set_font_entry_active(self, entry):
+        self._font_suggest_entry = entry
+
+    def _show_font_suggestions(self, entry=None):
+        entry, var, arrow, _apply = self._font_entry_spec(entry)
+        if not entry.winfo_ismapped():
+            return
+        matches = self._font_matches(var.get())
+        if not matches:
+            self._hide_font_suggestions()
+            return
+        top, listbox = self._font_suggest_widgets()
+        visible = matches[:12]
+        listbox.configure(height=len(visible))
+        listbox.delete(0, "end")
+        for name in visible:
+            listbox.insert("end", name)
+        listbox.selection_clear(0, "end")
+        top.update_idletasks()
+        width = max(
+            entry.winfo_width() + arrow.winfo_width(),
+            170,
+        )
+        height = min(max(listbox.winfo_reqheight(), 20), 220)
+        x = max(entry.winfo_rootx(), 0)
+        y = entry.winfo_rooty() + entry.winfo_height() + 2
+        if y + height > self.winfo_screenheight() - 4:
+            y = max(entry.winfo_rooty() - height - 2, 4)
+        self._font_suggest_entry = entry
+        top.wm_geometry(f"{width}x{height}+{x}+{y}")
+        top.deiconify()
+        top.lift()
+
+    def _hide_font_suggestions(self, _event=None):
+        top = getattr(self, "_font_suggest", None)
+        if top is not None and top.winfo_exists():
+            top.withdraw()
+        if _event is not None:
+            return "break"
+
+    def _update_font_suggestions(self, event=None, entry=None):
+        if event is not None and event.keysym in (
+            "Up", "Down", "Return", "Escape", "Tab", "ISO_Left_Tab",
+            "Left", "Right", "Home", "End",
+            "Shift_L", "Shift_R", "Control_L", "Control_R",
+            "Alt_L", "Alt_R",
+        ):
+            return
+        self._show_font_suggestions(entry)
+
+    def _move_font_suggestion(self, direction):
+        top = self._font_suggest
+        listbox = self._font_suggest_list
+        if top is None or not top.winfo_exists() or not top.winfo_ismapped():
+            self._show_font_suggestions()
+            return
+        if listbox is None or not listbox.size():
+            return
+        current = listbox.curselection()
+        index = (current[0] + direction) if current else 0
+        index = max(0, min(index, listbox.size() - 1))
+        listbox.selection_clear(0, "end")
+        listbox.selection_set(index)
+        listbox.activate(index)
+        listbox.see(index)
+
+    def _font_suggest_down(self, _event=None):
+        self._move_font_suggestion(1)
+        return "break"
+
+    def _font_suggest_up(self, _event=None):
+        self._move_font_suggestion(-1)
+        return "break"
+
+    def _apply_font_field(self, _event=None, entry=None):
+        entry = entry or self._font_suggest_entry or self.info_font_family_entry
+        _entry, var, _arrow, apply = self._font_entry_spec(entry)
+        top = self._font_suggest
+        listbox = self._font_suggest_list
+        if (
+            top is not None and top.winfo_exists() and top.winfo_ismapped()
+            and listbox is not None and listbox.size()
+        ):
+            current = listbox.curselection()
+            if current:
+                var.set(listbox.get(current[0]))
+        self._hide_font_suggestions()
+        apply()
+        return "break"
+
+    def _pick_font_suggestion(self, event):
+        listbox = self._font_suggest_list
+        if listbox is None:
+            return
+        index = listbox.nearest(event.y)
+        if index < 0 or index >= listbox.size():
+            return
+        entry = self._font_suggest_entry or self.info_font_family_entry
+        _entry, var, _arrow, apply = self._font_entry_spec(entry)
+        var.set(listbox.get(index))
+        self._hide_font_suggestions()
+        apply()
+        entry.focus_set()
+
+    def _toggle_font_suggestions(self, _event=None, entry=None):
+        entry = entry or self.info_font_family_entry
+        entry.focus_set()
+        top = self._font_suggest
+        if top is not None and top.winfo_exists() and top.winfo_ismapped():
+            self._hide_font_suggestions()
+        else:
+            self._show_font_suggestions(entry)
+        return "break"
+
+    def _on_font_focus_out(self, _event=None):
+        if self._font_focus_after is not None:
+            self.after_cancel(self._font_focus_after)
+        self._font_focus_after = self.after(
+            150, self._finish_font_focus_out
+        )
+
+    def _finish_font_focus_out(self):
+        self._font_focus_after = None
+        focus = self.focus_get()
+        if focus in (
+            self.info_font_family_entry,
+            getattr(self, "body_font_family_entry", None),
+        ):
+            return
+        if focus is self._font_suggest_list:
+            return
+        entry = self._font_suggest_entry or self.info_font_family_entry
+        _entry, _var, _arrow, apply = self._font_entry_spec(entry)
+        self._hide_font_suggestions()
+        apply()
 
     def _set_info_entry(self, entry, value):
         entry.configure(state="normal")
@@ -694,7 +2650,10 @@ class App(tk.Tk):
         if self._updating_info:
             return
         rect = self._active_rect()
-        if rect is None:
+        image = self._active_image() if rect is None else None
+        if rect is None and image is None and (
+            self.active_layer is None or self._active_text() is not None
+        ):
             return
         try:
             width = max(1, int(self.info_width_entry.get()))
@@ -702,12 +2661,31 @@ class App(tk.Tk):
         except ValueError:
             self._refresh_info()
             return
-        new_x2 = rect["x1"] + width
-        new_y2 = rect["y1"] + height
-        if new_x2 == rect["x2"] and new_y2 == rect["y2"]:
-            return
-        self._push_history()
-        rect["x2"], rect["y2"] = new_x2, new_y2
+        if rect is not None:
+            new_x2 = rect["x1"] + width
+            new_y2 = rect["y1"] + height
+            if new_x2 == rect["x2"] and new_y2 == rect["y2"]:
+                return
+            self._push_history()
+            rect["x2"], rect["y2"] = new_x2, new_y2
+        elif image is not None:
+            width = min(width, 6000)
+            height = min(height, 6000)
+            if width == image.get("width") and height == image.get("height"):
+                return
+            self._push_history()
+            image["width"], image["height"] = width, height
+        else:
+            width = min(width, 6000)
+            height = min(height, 6000)
+            x1, y1, x2, y2 = self._layer_box_defaults()
+            if width == x2 - x1 and height == y2 - y1:
+                self._refresh_info()
+                return
+            self._push_history()
+            rect = self._ensure_layer_shape()
+            rect["x2"] = rect["x1"] + width
+            rect["y2"] = rect["y1"] + height
         self._render_document()
         self._refresh_info()
         self._refresh_doc_tab()
@@ -715,19 +2693,29 @@ class App(tk.Tk):
     def _apply_border_width(self, _event=None):
         if self._updating_info:
             return
-        rect = self._active_rect()
-        if rect is None:
+        shape = self._active_shape()
+        if shape is None and (
+            self.active_layer is None or self._active_text() is not None
+        ):
             return
         try:
             border_width = max(0, min(50, int(self.info_border_entry.get())))
         except ValueError:
             self._refresh_info()
             return
-        if border_width == rect.get("border_width", 2):
-            self._refresh_info()
-            return
-        self._push_history()
-        rect["border_width"] = border_width
+        if shape is not None:
+            default = 2 if shape.get("type") in ("rect", "ellipse") else 0
+            if border_width == shape.get("border_width", default):
+                self._refresh_info()
+                return
+            self._push_history()
+        else:
+            if border_width == 2:
+                self._refresh_info()
+                return
+            self._push_history()
+            shape = self._ensure_layer_shape()
+        shape["border_width"] = border_width
         self._render_document()
         self._refresh_info()
         self._refresh_doc_tab()
@@ -747,36 +2735,62 @@ class App(tk.Tk):
     def _apply_border_color_text(self, _event=None):
         if self._updating_info:
             return
-        rect = self._active_rect()
-        if rect is None:
+        shape = self._active_shape()
+        if shape is None and (
+            self.active_layer is None or self._active_text() is not None
+        ):
             return
         color = self._parse_hex_color(self.info_border_color_entry.get())
         if color is None:
             self._refresh_info()
             return
-        self._set_border_color(rect, color)
+        if shape is None:
+            if color == BRUSH_COLOR:
+                self._refresh_info()
+                return
+            self._push_history()
+            shape = self._ensure_layer_shape()
+            shape["border_color"] = color
+            self._render_document()
+            self._refresh_info()
+            self._refresh_doc_tab()
+            return
+        self._set_border_color(shape, color)
 
     def _apply_background_text(self, _event=None):
         if self._updating_info:
             return
         rect = self._active_rect()
-        if rect is None:
+        if rect is None and (
+            self.active_layer is None
+            or self._active_image() is not None
+            or self._active_text() is not None
+        ):
             return
         text = self.info_bg_entry.get().strip()
         if not text:
-            self._set_background_color(rect, "")
+            if rect is not None:
+                self._set_background_color(rect, "")
             return
         color = self._parse_hex_color(text)
         if color is None:
             self._refresh_info()
             return
+        if rect is None:
+            self._push_history()
+            rect = self._ensure_layer_shape()
+            rect["background"] = color
+            self._render_document()
+            self._refresh_info()
+            self._refresh_doc_tab()
+            return
         self._set_background_color(rect, color)
 
-    def _set_border_color(self, rect, color):
-        current = rect.get("border_color") or rect.get("color") or BRUSH_COLOR
+    def _set_border_color(self, shape, color):
+        current = shape.get("border_color") or shape.get("color") or BRUSH_COLOR
         if color != current:
             self._push_history()
-            rect["border_color"] = color
+            shape["border_color"] = color
             self._render_document()
             self._refresh_doc_tab()
         self._refresh_info()
@@ -790,32 +2804,171 @@ class App(tk.Tk):
         self._refresh_info()
 
     def _choose_border_color(self, _event=None):
-        rect = self._active_rect()
-        if rect is None:
+        shape = self._active_shape()
+        if shape is None and (
+            self.active_layer is None or self._active_text() is not None
+        ):
             return
-        current = rect.get("border_color") or rect.get("color") or BRUSH_COLOR
+        current = (
+            shape.get("border_color") or shape.get("color") or BRUSH_COLOR
+        ) if shape is not None else BRUSH_COLOR
         _rgb, color = colorchooser.askcolor(
             color=current, title="Chọn màu viền", parent=self
         )
         if color:
-            self._set_border_color(rect, color)
+            if shape is None:
+                self._push_history()
+                shape = self._ensure_layer_shape()
+                shape["border_color"] = color
+                self._render_document()
+                self._refresh_info()
+                self._refresh_doc_tab()
+            else:
+                self._set_border_color(shape, color)
 
     def _choose_background_color(self, _event=None):
         rect = self._active_rect()
-        if rect is None:
+        if rect is None and (
+            self.active_layer is None
+            or self._active_image() is not None
+            or self._active_text() is not None
+        ):
             return
-        current = rect.get("background") or "#ffffff"
+        current = (rect.get("background") or "#ffffff") if rect else "#ffffff"
         _rgb, color = colorchooser.askcolor(
             color=current, title="Chọn màu nền", parent=self
         )
         if color:
-            self._set_background_color(rect, color)
+            if rect is None:
+                self._push_history()
+                rect = self._ensure_layer_shape()
+                rect["background"] = color
+                self._render_document()
+                self._refresh_info()
+                self._refresh_doc_tab()
+            else:
+                self._set_background_color(rect, color)
 
     def _clear_background(self, _event=None):
         rect = self._active_rect()
         if rect is None or not rect.get("background"):
             return
         self._set_background_color(rect, "")
+
+    def _apply_body_font(self, _event=None):
+        family = self.body_font_family_var.get().strip()[:60] or "none"
+        if family.lower() == "none":
+            family = "none"
+        self.body_font_family_var.set(family)
+        if family == self.body_font_family:
+            return
+        self._push_history()
+        self.body_font_family = family
+        self._render_document()
+        self._refresh_doc_tab()
+
+    def _on_align_click(self, value):
+        text = self._active_text()
+        if text is None:
+            return "break"
+        current = self._text_align_state(text)
+        self.info_align_var.set("" if current == value else value)
+        self._apply_text_style()
+        return "break"
+
+    def _apply_text_style(self, _event=None):
+        if self._updating_info:
+            return
+        text = self._active_text()
+        if text is None:
+            return
+        try:
+            font_family = (
+                self.info_font_family_var.get().strip()[:60] or "none"
+            )
+            if font_family.lower() == "none":
+                font_family = "none"
+            font_size = max(1, min(300, int(self.info_font_size_entry.get())))
+            line_height = max(
+                0.5,
+                min(5.0, float(
+                    self.info_line_height_entry.get().replace(",", ".")
+                )),
+            )
+            letter_spacing = max(
+                -20, min(100, int(self.info_letter_spacing_entry.get()))
+            )
+            weight_text = self.info_weight_var.get().strip()
+            try:
+                font_weight = max(100, min(900, int(weight_text)))
+            except ValueError:
+                font_weight = 400
+            font_weight = round(font_weight / 100) * 100
+        except ValueError:
+            self._refresh_info()
+            return
+        align = self.info_align_var.get().strip().lower()
+        if align not in ("left", "center", "right"):
+            align = "none"
+        tag = self.info_tag_var.get().strip().lower()
+        if tag not in TEXT_TAGS:
+            tag = "p"
+        updated = {
+            "font_family": font_family,
+            "font_size": font_size,
+            "font_weight": font_weight,
+            "line_height": round(line_height, 2),
+            "letter_spacing": letter_spacing,
+            "text_transform": self.info_transform_var.get(),
+            "text_align": align,
+            "text_tag": tag,
+        }
+        if align == "none":
+            updated["text_frame"] = None
+        elif self.marquee_region is not None:
+            updated["text_frame"] = list(self.marquee_region)
+        if all(text.get(key) == value for key, value in updated.items()):
+            self._refresh_info()
+            return
+        tag_changed = self._text_tag(text) != tag
+        self._push_history()
+        text.update(updated)
+        self._render_document()
+        if tag_changed:
+            self._refresh_layers()
+        else:
+            self._refresh_info()
+        self._refresh_doc_tab()
+
+    def _set_text_color(self, text, color):
+        if color != (text.get("color") or ""):
+            self._push_history()
+            text["color"] = color
+            self._render_document()
+            self._refresh_doc_tab()
+        self._refresh_info()
+
+    def _apply_text_color_text(self, _event=None):
+        if self._updating_info:
+            return
+        text = self._active_text()
+        if text is None:
+            return
+        color = self._parse_hex_color(self.info_text_color_entry.get())
+        if color is None:
+            self._refresh_info()
+            return
+        self._set_text_color(text, color)
+
+    def _choose_text_color(self, _event=None):
+        text = self._active_text()
+        if text is None:
+            return
+        _rgb, color = colorchooser.askcolor(
+            color=text.get("color") or TEXT, title="Chọn màu chữ", parent=self
+        )
+        if color:
+            self._set_text_color(text, color)
 
     def _paint_swatch(self, canvas, color):
         canvas.delete("all")
@@ -840,6 +2993,19 @@ class App(tk.Tk):
         button.bind("<Leave>", lambda _e: button.configure(bg=PANEL_BG, fg=MUTED))
         return button
 
+    def _open_save_menu(self, event=None):
+        widget = event.widget if event is not None else None
+        if widget is not None and widget.winfo_exists():
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty() + widget.winfo_height()
+        else:
+            x = self.winfo_pointerx()
+            y = self.winfo_pointery()
+        try:
+            self.save_menu.tk_popup(x, y)
+        finally:
+            self.save_menu.grab_release()
+
     def _make_menu_item(self, parent, text, command, danger=False):
         fg = SUBTLE if danger else TEXT
         hover_bg = DANGER_BG if danger else HOVER_BG
@@ -850,7 +3016,7 @@ class App(tk.Tk):
             font=self.font_menu,
             fg=fg,
             bg=PANEL_BG,
-            padx=14,
+            padx=6,
             pady=8,
             cursor="hand2",
         )
@@ -885,16 +3051,89 @@ class App(tk.Tk):
         self.doc_canvas.configure(cursor=CURSORS.get(tool_id, "arrow"))
         self._update_status()
 
+    def _open_rect_shape_menu(self, event):
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg=PANEL_BG,
+            fg=TEXT,
+            activebackground=ACCENT,
+            activeforeground=TEXT,
+            selectcolor=ACCENT,
+            bd=0,
+        )
+        mode = tk.StringVar(value=self.rect_tool_shape)
+        for shape, label in (
+            ("rect", "Hình chữ nhật"),
+            ("ellipse", "Hình elip"),
+        ):
+            menu.add_radiobutton(
+                label=label,
+                variable=mode,
+                value=shape,
+                command=lambda value=shape: self._set_rect_shape_mode(value),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _set_rect_shape_mode(self, shape):
+        self.rect_tool_shape = shape
+        self.tool_names["rect"] = (
+            "Hình elip" if shape == "ellipse" else "Hình chữ nhật"
+        )
+        self._refresh_rect_tool_icon()
+        tip = self.tool_tips.get("rect")
+        if tip is not None:
+            tip.text = self.tool_names["rect"]
+        if self.active_tool_id != "rect":
+            self.select_tool("rect")
+        else:
+            self._update_status()
+
+    def _refresh_rect_tool_icon(self):
+        item, _backdrop = self.tool_items["rect"]
+        item.delete("all")
+        backdrop = item.create_rectangle(
+            2, 2, TOOL_SIZE - 2, TOOL_SIZE - 2, fill=PANEL_BG, outline=""
+        )
+        draw = (
+            draw_ellipse
+            if self.rect_tool_shape == "ellipse"
+            else draw_rect
+        )
+        draw(item, ICON)
+        self.tool_items["rect"] = (item, backdrop)
+        if self.active_tool_id == "rect":
+            item.itemconfigure(backdrop, fill=ACTIVE_BG)
+
     def _add_layer(self, record=True):
+        self._commit_text_editor()
         if record:
             self._push_history()
         self._create_layer()
         self._refresh_layers()
         self._refresh_doc_tab()
 
+    def _next_layer_name(self, prefix):
+        used = set()
+        marker = f"{prefix} "
+        for layer in self._iter_layers():
+            name = layer.name.strip()
+            if name.startswith(marker):
+                suffix = name[len(marker):]
+                if suffix.isdigit():
+                    used.add(int(suffix))
+        number = 1
+        while number in used:
+            number += 1
+        return f"{prefix} {number}"
+
     def _create_layer(self, name=None):
         self.layer_counter += 1
-        layer = Layer(name or f"Lớp {self.layer_counter}")
+        layer = Layer(name or self._next_layer_name("Lớp"))
         active = self.active_layer
         if active is not None and active.parent is not None:
             siblings = active.parent.children
@@ -906,11 +3145,42 @@ class App(tk.Tk):
         self.active_layer = layer
         return layer
 
+    def _is_text_layer(self, layer):
+        return any(record.get("type") == "text" for record in layer.items)
+
+    def _is_image_layer(self, layer):
+        return any(record.get("type") == "image" for record in layer.items)
+
+    def _shape_layer_kind(self, layer):
+        for record in layer.items:
+            if record.get("type") in ("rect", "ellipse"):
+                return record["type"]
+        return None
+
+    def _is_shape_layer(self, layer):
+        return self._shape_layer_kind(layer) is not None
+
+    def _can_draw_on(self, layer):
+        return (
+            layer is not None
+            and not layer.children
+            and not self._is_text_layer(layer)
+            and not self._is_image_layer(layer)
+            and not self._is_shape_layer(layer)
+        )
+
     def _clone_layer(self, layer):
         clone = Layer(layer.name)
         clone.visible = layer.visible
         clone.expanded = layer.expanded
         clone.items = [dict(item) for item in layer.items]
+        clone.display = self._layer_display(layer)
+        clone.align = self._layer_align(layer)
+        clone.justify = self._layer_justify(layer)
+        clone.gap = self._layer_gap(layer)
+        clone.background_image = (
+            dict(layer.background_image) if layer.background_image else None
+        )
         clone.children = [self._clone_layer(child) for child in layer.children]
         for child in clone.children:
             child.parent = clone
@@ -920,6 +3190,7 @@ class App(tk.Tk):
         entry = self._rename_entry
         if entry is not None and entry.winfo_exists():
             return "break"
+        self._commit_text_editor()
         layer = self.active_layer
         if layer is None:
             return "break"
@@ -971,6 +3242,7 @@ class App(tk.Tk):
         return False
 
     def _delete_layer(self):
+        self._commit_text_editor()
         layer = self.active_layer
         if layer is None or self._count_layers() <= 1:
             return
@@ -993,17 +3265,115 @@ class App(tk.Tk):
         self._refresh_doc_tab()
 
     def _select_layer(self, layer):
+        self._commit_text_editor()
+        self.selected_layers = [layer]
+        self._selection_anchor = layer
         self.active_layer = layer
         self._refresh_layer_selection()
         self._refresh_info()
         self._update_status()
+
+    def _select_layer_range(self, layer):
+        self._commit_text_editor()
+        order = list(self._panel_layers())
+        anchor = self._selection_anchor
+        if anchor not in order or layer not in order:
+            self._select_layer(layer)
+            return
+        start, end = order.index(anchor), order.index(layer)
+        if start > end:
+            start, end = end, start
+        self.selected_layers = order[start:end + 1]
+        self.active_layer = layer
+        self._refresh_layer_selection()
+        self._refresh_info()
+        self._update_status()
+
+    def _toggle_layer_selection(self, layer):
+        self._commit_text_editor()
+        if layer in self.selected_layers:
+            if len(self.selected_layers) == 1:
+                return
+            self.selected_layers.remove(layer)
+            if self.active_layer is layer:
+                self.active_layer = self.selected_layers[-1]
+        else:
+            self.selected_layers.append(layer)
+            self.active_layer = layer
+        self._selection_anchor = layer
+        self._refresh_layer_selection()
+        self._refresh_info()
+        self._update_status()
+
+    def _panel_layers(self, layers=None):
+        for layer in reversed(self.layers if layers is None else layers):
+            yield layer
+            if layer.children and layer.expanded:
+                yield from self._panel_layers(layer.children)
+
+    def _group_selected_layers(self, _event=None):
+        entry = self._rename_entry
+        if entry is not None and entry.winfo_exists():
+            return "break"
+        self._commit_text_editor()
+        order = [
+            layer
+            for layer in self._panel_layers()
+            if layer in self.selected_layers
+        ]
+        if not order:
+            return "break"
+        layers = [
+            layer
+            for layer in order
+            if not any(
+                self._is_descendant(layer, other)
+                for other in order
+                if other is not layer
+            )
+        ]
+        top = layers[0]
+        group_parent = top.parent
+        siblings = group_parent.children if group_parent else self.layers
+        selected_ids = {id(layer) for layer in layers}
+        top_index = siblings.index(top)
+        removed_below = sum(
+            1
+            for node in siblings[:top_index]
+            if id(node) in selected_ids
+        )
+        insert_at = top_index - removed_below
+
+        self._push_history()
+        for layer in layers:
+            current = layer.parent.children if layer.parent else self.layers
+            current.remove(layer)
+
+        group = Layer(self._next_layer_name("Nhóm"))
+        group.parent = group_parent
+        group.children = list(reversed(layers))
+        for child in group.children:
+            child.parent = group
+        siblings.insert(max(0, min(insert_at, len(siblings))), group)
+
+        self.active_layer = group
+        self.selected_layers = [group]
+        self._selection_anchor = group
+        self._refresh_layers()
+        self._render_document()
+        self._refresh_doc_tab()
+        return "break"
 
     def _refresh_layer_selection(self):
         for row in self.layer_list.winfo_children():
             layer = getattr(row, "_layer", None)
             if layer is None:
                 continue
-            bg = ACTIVE_BG if layer is self.active_layer else PANEL_BG
+            bg = (
+                ACTIVE_BG
+                if layer in self.selected_layers
+                else PANEL_BG
+            )
             row._layer_base_bg = bg
             for widget in row._layer_bg_widgets:
                 widget.configure(bg=bg)
@@ -1023,7 +3393,16 @@ class App(tk.Tk):
             "name": layer.name,
             "visible": layer.visible,
             "expanded": layer.expanded,
+            "display": self._layer_display(layer),
+            "align": self._layer_align(layer),
+            "justify": self._layer_justify(layer),
+            "gap": self._layer_gap(layer),
             "items": [dict(item) for item in layer.items],
+            "background_image": (
+                dict(layer.background_image)
+                if layer.background_image
+                else None
+            ),
             "children": [self._layer_state(child) for child in layer.children],
         }
 
@@ -1033,7 +3412,30 @@ class App(tk.Tk):
             layer = Layer(item["name"])
             layer.visible = item["visible"]
             layer.expanded = item.get("expanded", True)
+            display = item.get("display", "block")
+            layer.display = display if display in GROUP_DISPLAYS else "block"
+            align = item.get("align", "left")
+            layer.align = align if align in GROUP_ALIGNS else "left"
+            justify = item.get("justify", "left")
+            layer.justify = (
+                justify if justify in GROUP_JUSTIFIES else "left"
+            )
+            gap = item.get("gap", 0)
+            layer.gap = (
+                gap
+                if isinstance(gap, (int, float))
+                and not isinstance(gap, bool)
+                and gap >= 0
+                else 0
+            )
             layer.items = [dict(record) for record in item["items"]]
+            background = item.get("background_image")
+            if (
+                isinstance(background, dict)
+                and isinstance(background.get("data"), str)
+                and background["data"]
+            ):
+                layer.background_image = dict(background)
             layer.parent = parent
             layer.children = self._restore_layers(item.get("children", []), layer)
             layers.append(layer)
@@ -1044,15 +3446,19 @@ class App(tk.Tk):
             "layers": [self._layer_state(layer) for layer in self.layers],
             "active": self._layer_path(self.active_layer),
             "counter": self.layer_counter,
+            "body_font": self.body_font_family,
         })
         if len(self.history) > 50:
             self.history.pop(0)
 
     def _undo(self, _event=None):
+        self._commit_text_editor()
         if not self.history:
             return "break"
         state = self.history.pop()
         self.layer_counter = state["counter"]
+        self.body_font_family = state.get("body_font", "none")
+        self.body_font_family_var.set(self.body_font_family)
         self.layers = self._restore_layers(state["layers"])
         try:
             self.active_layer = self._layer_at(state["active"])
@@ -1067,13 +3473,29 @@ class App(tk.Tk):
         return {
             "name": layer.name,
             "visible": layer.visible,
+            "display": self._layer_display(layer),
+            "align": self._layer_align(layer),
+            "justify": self._layer_justify(layer),
+            "gap": self._layer_gap(layer),
             "items": layer.items,
+            "background_image": layer.background_image,
             "children": [self._layer_signature(child) for child in layer.children],
         }
 
     def _document_signature(self):
         return json.dumps(
-            [self._layer_signature(layer) for layer in self.layers],
+            {
+                "content": [
+                    self.content_width,
+                    self.content_height,
+                    self.content_full,
+                ],
+                "guides": self.guides,
+                "body_font": self.body_font_family,
+                "layers": [
+                    self._layer_signature(layer) for layer in self.layers
+                ],
+            },
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -1091,6 +3513,16 @@ class App(tk.Tk):
     def _refresh_layers(self):
         self._rename_entry = None
         self._rename_layer = None
+        existing = list(self._iter_layers())
+        self.selected_layers = [
+            layer for layer in self.selected_layers if layer in existing
+        ]
+        if (
+            self.active_layer is not None
+            and self.active_layer not in self.selected_layers
+        ):
+            self.selected_layers = [self.active_layer]
+            self._selection_anchor = self.active_layer
         for child in self.layer_list.winfo_children():
             child.destroy()
         self._drop_row = None
@@ -1107,8 +3539,8 @@ class App(tk.Tk):
                 self._build_layer_rows(layer.children, depth + 1)
 
     def _build_layer_row(self, layer, depth=0):
-        active = layer is self.active_layer
-        row_bg = ACTIVE_BG if active else PANEL_BG
+        selected = layer in self.selected_layers
+        row_bg = ACTIVE_BG if selected else PANEL_BG
 
         row = tk.Frame(self.layer_list, bg=row_bg, cursor="hand2")
         row.pack(fill="x", pady=1)
@@ -1142,6 +3574,35 @@ class App(tk.Tk):
             highlightthickness=1, highlightbackground=BORDER,
         )
         thumb.pack(side="left", padx=(0, 8), pady=6)
+        if layer.children:
+            thumb.create_polygon(
+                5, 10, 13, 10, 15, 13, 25, 13, 25, 23, 5, 23,
+                fill=ACCENT, outline="",
+            )
+            thumb.create_line(5, 14, 25, 14, fill="#1d4ed8")
+        elif self._is_image_layer(layer):
+            thumb.create_rectangle(6, 8, 24, 22, outline=ACCENT, width=1.5)
+            thumb.create_oval(16.5, 10, 19.5, 13, fill=ACCENT, outline="")
+            thumb.create_polygon(
+                7, 21, 12, 14, 16, 18, 19, 15, 23, 21,
+                fill=ACCENT, outline="",
+            )
+        elif self._shape_layer_kind(layer) == "ellipse":
+            thumb.create_oval(
+                7, 9, 23, 21, outline=ACCENT, width=1.8
+            )
+        elif self._is_shape_layer(layer):
+            thumb.create_rectangle(
+                7, 9, 23, 21, outline=ACCENT, width=1.8
+            )
+        elif any(item.get("type") == "text" for item in layer.items):
+            text_record = [
+                item for item in layer.items if item.get("type") == "text"
+            ][-1]
+            thumb.create_text(
+                15, 15, text=self._text_tag(text_record), fill=ACCENT,
+                font=("Segoe UI", 13, "bold"),
+            )
 
         name = tk.Label(
             row,
@@ -1173,6 +3634,14 @@ class App(tk.Tk):
         self._refresh_layers()
 
     def _on_layer_press(self, event, layer):
+        if event.state & 0x0004:
+            self._toggle_layer_selection(layer)
+            self._drag_layer = None
+            return "break"
+        if event.state & 0x0001:
+            self._select_layer_range(layer)
+            self._drag_layer = None
+            return "break"
         self._select_layer(layer)
         self._drag_layer = layer
         self._drag_origin = (event.x_root, event.y_root)
@@ -1446,8 +3915,220 @@ class App(tk.Tk):
         else:
             canvas.create_line(3, 3, 17, 17, fill=color, width=1.5)
 
+    def _text_record_at(self, x, y):
+        if self.active_layer is None:
+            return None
+        for record, x1, y1, x2, y2 in reversed(self._text_areas):
+            if not (x1 - 2 <= x <= x2 + 2 and y1 - 2 <= y <= y2 + 2):
+                continue
+            if any(record is entry for entry in self.active_layer.items):
+                return record
+        return None
+
+    def _on_canvas_double_click(self, event):
+        event = _DocEvent(event, self.zoom)
+        if self._guide_at(event.x, event.y) is not None:
+            return
+        record = self._text_record_at(event.x, event.y)
+        if record is None:
+            return
+        self._open_text_editor(record)
+
+    def _open_text_editor(self, record):
+        self._commit_text_editor()
+        font = self._text_font(record, self.zoom)
+        color = record.get("color") or TEXT
+        line_gap = max(
+            0,
+            round(font.metrics("linespace") * (self._text_line_height(record) - 1)),
+        )
+        editor = tk.Text(
+            self.doc_canvas,
+            font=font,
+            fg=color,
+            bg=DOC_BG,
+            insertbackground=color,
+            selectbackground=ACCENT,
+            selectforeground=BG,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=ACCENT,
+            highlightcolor=ACCENT,
+            wrap="none",
+            spacing3=line_gap,
+            padx=2,
+            pady=1,
+            undo=False,
+        )
+        editor.insert("1.0", record.get("text", ""))
+        editor.tag_configure("align", justify=self._text_align(record))
+        editor.tag_add("align", "1.0", "end")
+        editor._editor_font = font
+        self._text_editor = editor
+        self._text_editor_record = record
+        self._place_text_editor()
+        editor.mark_set("insert", "end-1c")
+        editor.bind("<KeyRelease>", lambda _e: self._place_text_editor())
+        editor.bind("<FocusOut>", lambda _e: self._commit_text_editor())
+        editor.bind("<Escape>", lambda _e: self._cancel_text_editor())
+        editor.bind("<Control-z>", lambda _e: "break")
+        editor.bind("<Control-Z>", lambda _e: "break")
+        editor.focus_set()
+
+    def _place_text_editor(self):
+        editor = self._text_editor
+        record = self._text_editor_record
+        if editor is None or record is None:
+            return
+        font = editor._editor_font
+        content = editor.get("1.0", "end-1c")
+        if self._text_transform(record) == "uppercase":
+            content = content.upper()
+        lines = content.split("\n")
+        line_gap = int(editor.cget("spacing3"))
+        letter_spacing = self._text_letter_spacing(record) * self.zoom
+        width = max((font.measure(line) for line in lines), default=0) + 14
+        longest = max((len(line) for line in lines), default=0)
+        if letter_spacing and longest > 1:
+            width += int(letter_spacing * (longest - 1))
+        height = (
+            len(lines) * font.metrics("linespace")
+            + len(lines) * line_gap
+            + 10
+        )
+        frame = self._text_frame(record)
+        dx, dy = self._record_offsets.get(id(record), (0.0, 0.0))
+        if frame is not None:
+            editor_x = (frame[0] + dx) * self.zoom
+            width = max((frame[2] - frame[0]) * self.zoom + 6, 48)
+        else:
+            editor_x = (record["x"] + dx) * self.zoom
+            width = max(width, 48)
+        editor.tag_configure("align", justify=self._text_align(record))
+        editor.tag_add("align", "1.0", "end")
+        editor.place(
+            x=editor_x - 3,
+            y=(record["y"] + dy) * self.zoom - 3,
+            width=width,
+            height=max(height, font.metrics("linespace") + 10),
+        )
+        editor.lift()
+
+    def _commit_text_editor(self):
+        editor = self._text_editor
+        record = self._text_editor_record
+        if editor is None or record is None:
+            return False
+        self._text_editor = None
+        self._text_editor_record = None
+        try:
+            content = editor.get("1.0", "end-1c")
+        except tk.TclError:
+            content = record.get("text", "")
+        editor.destroy()
+        if content == record.get("text", ""):
+            return False
+        self._push_history()
+        record["text"] = content
+        self._render_document()
+        self._refresh_doc_tab()
+        return True
+
+    def _cancel_text_editor(self):
+        editor = self._text_editor
+        if editor is None:
+            return "break"
+        self._text_editor = None
+        self._text_editor_record = None
+        editor.destroy()
+        return "break"
+
+    def _marquee_span(self, x1, y1, x2, y2):
+        x1, x2 = sorted((
+            max(0, min(x1, self.content_width)),
+            max(0, min(x2, self.content_width)),
+        ))
+        y1, y2 = sorted((
+            max(0, min(y1, self.content_height)),
+            max(0, min(y2, self.content_height)),
+        ))
+        return (x1, y1, x2, y2)
+
+    def _finish_marquee(self, event):
+        x1, y1 = self._marquee_start
+        self._marquee_start = None
+        self.doc_canvas.delete("marquee_preview")
+        region = self._marquee_span(x1, y1, event.x, event.y)
+        width = region[2] - region[0]
+        height = region[3] - region[1]
+        if width < 3 or height < 3:
+            self.marquee_region = None
+            self.doc_canvas.delete("marquee")
+            self._flash_status("Đã bỏ vùng chọn.")
+            return
+        self.marquee_region = region
+        self._draw_marquee_overlay()
+        self._flash_status(
+            f"Vùng chọn: {round(width)} × {round(height)} px"
+            " — canh văn bản theo vùng này."
+        )
+
+    def _draw_marquee_overlay(self, region=None, tag="marquee"):
+        self.doc_canvas.delete(tag)
+        region = self.marquee_region if region is None else region
+        if region is None:
+            return
+        zoom = self.zoom
+        x1, y1, x2, y2 = [value * zoom for value in region]
+        self.doc_canvas.create_rectangle(
+            x1, y1, x2, y2,
+            outline=ACCENT, width=1, dash=(4, 3), tags=tag,
+        )
+        label = (
+            f"{round(region[2] - region[0])} × "
+            f"{round(region[3] - region[1])} px"
+        )
+        pad = 5
+        chip_h = 18
+        chip_w = self.font_marquee.measure(label) + pad * 2
+        chip_x = x1
+        chip_y = y1 - chip_h - 2
+        if chip_y < 1:
+            chip_y = max(min(y1 + 2, y2 - chip_h), 1)
+        self.doc_canvas.create_rectangle(
+            chip_x, chip_y, chip_x + chip_w, chip_y + chip_h,
+            fill="#0b1220", outline=ACCENT, tags=tag,
+        )
+        self.doc_canvas.create_text(
+            chip_x + pad, chip_y + chip_h / 2, text=label,
+            fill="#e2e8f0", font=self.font_marquee, anchor="w", tags=tag,
+        )
+
     def _on_canvas_press(self, event):
+        event = _DocEvent(event, self.zoom)
+        if self._text_editor is not None:
+            self._commit_text_editor()
+            return
+        guide = self._guide_at(event.x, event.y)
+        if guide is not None and self.active_tool_id == "move":
+            self._moving_guide = guide
+            self._guide_move_start = guide["pos"]
+            return
         tool = self.active_tool_id
+        zoom = self.zoom
+        if tool == "marquee":
+            self._marquee_start = (event.x, event.y)
+            self.doc_canvas.delete("marquee_preview")
+            return
+        if tool in ("brush", "eraser") and not self._can_draw_on(
+            self.active_layer
+        ):
+            self._flash_status(
+                "Không thể vẽ vào nhóm, lớp văn bản, lớp hình hoặc"
+                " lớp hình khối — chọn lớp thường để vẽ."
+            )
+            return
         if tool in ("brush", "eraser"):
             color = DOC_BG if tool == "eraser" else BRUSH_COLOR
             width = 18 if tool == "eraser" else 4
@@ -1457,20 +4138,28 @@ class App(tk.Tk):
                 "width": width,
             }
             self._last_point = (event.x, event.y)
-            radius = width / 2
+            radius = width / 2 * zoom
             dot = self.doc_canvas.create_oval(
-                event.x - radius, event.y - radius,
-                event.x + radius, event.y + radius,
+                event.x * zoom - radius, event.y * zoom - radius,
+                event.x * zoom + radius, event.y * zoom + radius,
                 fill=color, outline="", tags="temp",
             )
             self._temp_ids = [dot]
         elif tool == "rect":
             self._rect_start = (event.x, event.y)
-            self._rect_preview = self.doc_canvas.create_rectangle(
-                event.x, event.y, event.x, event.y,
+            preview = (
+                self.doc_canvas.create_oval
+                if self.rect_tool_shape == "ellipse"
+                else self.doc_canvas.create_rectangle
+            )
+            self._rect_preview = preview(
+                event.x * zoom, event.y * zoom,
+                event.x * zoom, event.y * zoom,
                 outline=BRUSH_COLOR, width=2, dash=(4, 2), tags="temp",
             )
         elif tool == "text":
+            if self._text_record_at(event.x, event.y) is not None:
+                return
             content = simpledialog.askstring("Văn bản", "Nhập nội dung:", parent=self)
             if content:
                 self._push_history()
@@ -1480,8 +4169,18 @@ class App(tk.Tk):
                     "y": event.y,
                     "text": content,
                     "color": "#0f172a",
+                    "font_family": "none",
+                    "font_size": 14,
+                    "font_weight": 400,
+                    "line_height": 1.4,
+                    "letter_spacing": 0,
+                    "text_transform": "none",
+                    "text_align": "left",
+                    "text_tag": "p",
                 }
+                self._create_layer(self._next_layer_name("Văn bản"))
                 self.active_layer.items.append(record)
+                self._refresh_layers()
                 self._draw_record(record)
                 self._refresh_doc_tab()
         elif tool == "move":
@@ -1492,14 +4191,29 @@ class App(tk.Tk):
                 self._move_moved = False
 
     def _on_canvas_drag(self, event):
+        event = _DocEvent(event, self.zoom)
+        if self._moving_guide is not None:
+            self._move_guide_to(
+                event.y
+                if self._moving_guide["orient"] == "h"
+                else event.x
+            )
+            return
         tool = self.active_tool_id
-        if tool in ("brush", "eraser") and self._stroke is not None:
+        zoom = self.zoom
+        if tool == "marquee" and self._marquee_start is not None:
+            x1, y1 = self._marquee_start
+            region = self._marquee_span(x1, y1, event.x, event.y)
+            self._draw_marquee_overlay(region, tag="marquee_preview")
+        elif tool in ("brush", "eraser") and self._stroke is not None:
             last_x, last_y = self._last_point
             if (event.x, event.y) == (last_x, last_y):
                 return
             segment = self.doc_canvas.create_line(
-                last_x, last_y, event.x, event.y,
-                fill=self._stroke["color"], width=self._stroke["width"],
+                last_x * zoom, last_y * zoom, event.x * zoom,
+                event.y * zoom,
+                fill=self._stroke["color"],
+                width=max(1, round(self._stroke["width"] * zoom)),
                 capstyle="round", tags="temp",
             )
             self._temp_ids.append(segment)
@@ -1507,7 +4221,10 @@ class App(tk.Tk):
             self._last_point = (event.x, event.y)
         elif tool == "rect" and self._rect_preview is not None:
             x1, y1 = self._rect_start
-            self.doc_canvas.coords(self._rect_preview, x1, y1, event.x, event.y)
+            self.doc_canvas.coords(
+                self._rect_preview,
+                x1 * zoom, y1 * zoom, event.x * zoom, event.y * zoom,
+            )
         elif tool == "move" and self._move_last is not None:
             dx = event.x - self._move_last[0]
             dy = event.y - self._move_last[1]
@@ -1521,7 +4238,19 @@ class App(tk.Tk):
             self._render_document()
 
     def _on_canvas_release(self, event):
+        native_event = event
+        event = _DocEvent(event, self.zoom)
+        if self._moving_guide is not None:
+            guide = self._moving_guide
+            self._moving_guide = None
+            if guide["pos"] != self._guide_move_start:
+                self._refresh_doc_tab()
+            self._on_canvas_motion(native_event)
+            return
         tool = self.active_tool_id
+        if tool == "marquee" and self._marquee_start is not None:
+            self._finish_marquee(event)
+            return
         if self._stroke is not None:
             for item_id in self._temp_ids:
                 self.doc_canvas.delete(item_id)
@@ -1553,8 +4282,13 @@ class App(tk.Tk):
             self._rect_preview = None
             x2, y2 = event.x, event.y
             if abs(x2 - x1) >= 3 and abs(y2 - y1) >= 3:
+                kind = (
+                    "ellipse"
+                    if self.rect_tool_shape == "ellipse"
+                    else "rect"
+                )
                 record = {
-                    "type": "rect",
+                    "type": kind,
                     "x1": min(x1, x2),
                     "y1": min(y1, y2),
                     "x2": max(x1, x2),
@@ -1564,8 +4298,12 @@ class App(tk.Tk):
                     "background": "",
                 }
                 self._push_history()
-                self._create_layer(f"Hình chữ nhật {self.layer_counter + 1}")
-                self.active_layer.items.append(record)
+                layer = self._create_layer(
+                    self._next_layer_name(
+                        "Hình elip" if kind == "ellipse" else "Hình chữ nhật"
+                    )
+                )
+                layer.items.append(record)
                 self._refresh_layers()
                 self._draw_record(record)
                 self._refresh_doc_tab()
@@ -1576,6 +4314,194 @@ class App(tk.Tk):
             if moved:
                 self._refresh_info()
                 self._refresh_doc_tab()
+
+    def _insert_image(self, _event=None):
+        self._commit_text_editor()
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Chèn hình",
+            filetypes=[
+                ("Hình ảnh", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("Tất cả tệp", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+            data, mime, width, height = self._prepare_image(raw, path)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Lỗi chèn hình", str(error), parent=self)
+            return
+
+        canvas_width = max(
+            round(self.doc_canvas.winfo_width() / self.zoom), 1
+        )
+        canvas_height = max(
+            round(self.doc_canvas.winfo_height() / self.zoom), 1
+        )
+        x = max((canvas_width - width) // 2, 10)
+        y = max((canvas_height - height) // 2, 10)
+        record = {
+            "type": "image",
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "data": data,
+            "mime": mime,
+            "border_color": BRUSH_COLOR,
+            "border_width": 0,
+        }
+        self._push_history()
+        self._create_layer(self._next_layer_name("Hình ảnh"))
+        self.active_layer.items.append(record)
+        self._refresh_layers()
+        self._draw_record(record)
+        self._refresh_doc_tab()
+
+    def _prepare_image(self, raw, path):
+        if Image is not None:
+            try:
+                with Image.open(BytesIO(raw)) as image:
+                    image.load()
+                    width, height = image.size
+                    buffer = BytesIO()
+                    image.convert("RGBA").save(buffer, format="PNG")
+            except Exception as error:
+                raise ValueError("Không đọc được tệp hình ảnh.") from error
+            data = base64.b64encode(buffer.getvalue()).decode("ascii")
+            return data, "image/png", width, height
+
+        extension = os.path.splitext(path)[1].lower()
+        if extension not in (".png", ".gif"):
+            raise ValueError(
+                "Cần cài Pillow để chèn định dạng hình này."
+            )
+        data = base64.b64encode(raw).decode("ascii")
+        try:
+            photo = tk.PhotoImage(data=data)
+        except tk.TclError as error:
+            raise ValueError("Không đọc được tệp hình ảnh.") from error
+        mime = "image/png" if extension == ".png" else "image/gif"
+        return data, mime, photo.width(), photo.height()
+
+    def _make_photo(self, record):
+        data = record.get("data")
+        if not data:
+            return None
+        try:
+            return tk.PhotoImage(data=data)
+        except tk.TclError:
+            if Image is None:
+                return None
+        try:
+            raw = base64.b64decode(data)
+            with Image.open(BytesIO(raw)) as image:
+                buffer = BytesIO()
+                image.convert("RGBA").save(buffer, format="PNG")
+            return tk.PhotoImage(
+                data=base64.b64encode(buffer.getvalue()).decode("ascii")
+            )
+        except Exception:
+            return None
+
+    def _scale_photo(self, record, photo, width, height):
+        if photo.width() == width and photo.height() == height:
+            return photo
+        if Image is None:
+            return photo
+        key = (id(record), width, height)
+        scaled = self._image_scaled.get(key)
+        if scaled is not None:
+            return scaled
+        data = record.get("data")
+        if not data:
+            return photo
+        try:
+            raw = base64.b64decode(data)
+            with Image.open(BytesIO(raw)) as image:
+                resized = image.convert("RGBA").resize((width, height))
+                buffer = BytesIO()
+                resized.save(buffer, format="PNG")
+            scaled = tk.PhotoImage(
+                data=base64.b64encode(buffer.getvalue()).decode("ascii")
+            )
+        except Exception:
+            return photo
+        self._image_scaled[key] = scaled
+        return scaled
+
+    def _background_photo(self, record, width, height):
+        size = self._background_setting(record, "size")
+        position = self._background_setting(record, "position")
+        repeat = self._background_setting(record, "repeat")
+        key = (id(record), width, height, size, position, repeat)
+        cached = self._image_scaled.get(key)
+        if cached is not None:
+            return cached
+        data = record.get("data")
+        if not data:
+            return None
+        if Image is not None:
+            photo = self._compose_background(
+                data, width, height, size, position, repeat
+            )
+            if photo is not None:
+                self._image_scaled[key] = photo
+                return photo
+        photo = self._make_photo(record)
+        if photo is None:
+            return None
+        photo = self._scale_photo(record, photo, width, height)
+        self._image_scaled[key] = photo
+        return photo
+
+    def _compose_background(self, data, width, height, size, position,
+                            repeat):
+        try:
+            raw = base64.b64decode(data)
+            with Image.open(BytesIO(raw)) as source:
+                image = source.convert("RGBA")
+        except Exception:
+            return None
+        source_width, source_height = image.size
+        if source_width < 1 or source_height < 1:
+            return None
+        if size == "contain":
+            scale = min(width / source_width, height / source_height)
+        else:
+            scale = max(width / source_width, height / source_height)
+        tile_width = max(round(source_width * scale), 1)
+        tile_height = max(round(source_height * scale), 1)
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        tile = image.resize((tile_width, tile_height), resample)
+        composed = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        if position == "left":
+            offset_x = 0
+        elif position == "right":
+            offset_x = width - tile_width
+        else:
+            offset_x = (width - tile_width) // 2
+        offset_y = 0 if position == "top" else (height - tile_height) // 2
+        if repeat == "repeat":
+            start_x = offset_x % tile_width
+            start_y = offset_y % tile_height
+            y = start_y - tile_height
+            while y < height:
+                x = start_x - tile_width
+                while x < width:
+                    composed.paste(tile, (x, y), tile)
+                    x += tile_width
+                y += tile_height
+        else:
+            composed.paste(tile, (offset_x, offset_y), tile)
+        buffer = BytesIO()
+        composed.save(buffer, format="PNG")
+        return tk.PhotoImage(
+            data=base64.b64encode(buffer.getvalue()).decode("ascii")
+        )
 
     def _has_drawable_items(self, layer):
         if layer.items:
@@ -1595,55 +4521,513 @@ class App(tk.Tk):
                 value + (dx if index % 2 == 0 else dy)
                 for index, value in enumerate(record["coords"])
             ]
-        elif kind in ("dot", "text"):
+        elif kind in ("dot", "text", "image"):
             record["x"] += dx
             record["y"] += dy
-        elif kind == "rect":
+            if kind == "text":
+                frame = self._text_frame(record)
+                if frame is not None:
+                    record["text_frame"] = [
+                        frame[0] + dx, frame[1] + dy,
+                        frame[2] + dx, frame[3] + dy,
+                    ]
+        elif kind in ("rect", "ellipse"):
             record["x1"] += dx
             record["y1"] += dy
             record["x2"] += dx
             record["y2"] += dy
 
-    def _draw_record(self, record):
+    def _text_weight_value(self, record):
+        weight = record.get("font_weight", 400)
+        if isinstance(weight, str):
+            lowered = weight.strip().lower()
+            if lowered == "normal":
+                return 400
+            if lowered == "bold":
+                return 700
+            try:
+                weight = int(lowered)
+            except ValueError:
+                return 400
+        try:
+            return max(100, min(900, int(weight)))
+        except (TypeError, ValueError):
+            return 400
+
+    def _text_family(self, record):
+        return str(record.get("font_family", "none")).strip() or "none"
+
+    def _text_font(self, record, zoom=1.0):
+        weight = "bold" if self._text_weight_value(record) >= 600 else "normal"
+        family = self._text_family(record)
+        if family == "none":
+            family = (
+                self.body_font_family
+                if self.body_font_family != "none"
+                else "Segoe UI"
+            )
+        size = max(int(round(int(record.get("font_size", 14)) * zoom)), 1)
+        key = (family, size, weight)
+        font = self._font_cache.get(key)
+        if font is None:
+            font = tkfont.Font(family=family, size=size, weight=weight)
+            self._font_cache[key] = font
+        return font
+
+    def _text_line_height(self, record):
+        try:
+            return max(float(record.get("line_height", 1.4)), 0.5)
+        except (TypeError, ValueError):
+            return 1.4
+
+    def _text_transform(self, record):
+        return (
+            "uppercase"
+            if str(record.get("text_transform", "none")).lower() == "uppercase"
+            else "none"
+        )
+
+    def _text_align_state(self, record):
+        align = str(record.get("text_align", "left")).lower()
+        return align if align in ("left", "center", "right") else "none"
+
+    def _text_align(self, record):
+        align = self._text_align_state(record)
+        return "left" if align == "none" else align
+
+    def _text_tag(self, record):
+        tag = str(record.get("text_tag", "p")).lower()
+        return tag if tag in TEXT_TAGS else "p"
+
+    def _text_frame(self, record):
+        frame = record.get("text_frame")
+        if not isinstance(frame, (list, tuple)) or len(frame) != 4:
+            return None
+        try:
+            x1, y1, x2, y2 = (float(value) for value in frame)
+        except (TypeError, ValueError):
+            return None
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2, y2)
+
+    def _text_block_start(self, record, block_width):
+        frame = self._text_frame(record)
+        if frame is None:
+            return record["x"]
+        x1, _y1, x2, _y2 = frame
+        frame_width = x2 - x1
+        align = self._text_align(record)
+        if align == "center":
+            return x1 + (frame_width - block_width) / 2
+        if align == "right":
+            return x1 + frame_width - block_width
+        return x1
+
+    def _text_display_text(self, record):
+        text = str(record.get("text", ""))
+        return text.upper() if self._text_transform(record) == "uppercase" else text
+
+    def _text_letter_spacing(self, record):
+        try:
+            return float(record.get("letter_spacing", 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _text_metrics(self, record):
+        font = self._text_font(record)
+        line_height = self._text_line_height(record)
+        letter_spacing = self._text_letter_spacing(record)
+        advance = max(
+            int(round(font.metrics("linespace") * line_height)), 1
+        )
+        lines = self._text_display_text(record).split("\n")
+        widths = []
+        for line in lines:
+            if letter_spacing:
+                width = (
+                    sum(font.measure(ch) + letter_spacing for ch in line)
+                    - letter_spacing
+                )
+                widths.append(max(width, 0))
+            else:
+                widths.append(font.measure(line))
+        height = advance * (len(lines) - 1) + font.metrics("linespace")
+        return font, lines, widths, advance, letter_spacing, height
+
+    def _draw_text_record(self, record, dx=0.0, dy=0.0):
+        font, lines, widths, advance, letter_spacing, height = (
+            self._text_metrics(record)
+        )
+        y = record["y"] + dy
+        block_width = max(widths, default=0)
+        block_start = self._text_block_start(record, block_width) + dx
+        self._text_areas.append(
+            (record, block_start, y, block_start + block_width, y + height)
+        )
+        color = record.get("color") or TEXT
+        align = self._text_align(record)
+        zoom = self.zoom
+        draw_font = font if zoom == 1 else self._text_font(record, zoom)
+        x = block_start * zoom
+        y *= zoom
+        advance *= zoom
+        letter_spacing *= zoom
+        for index, line in enumerate(lines):
+            line_x = x
+            if align == "center":
+                line_x += (block_width - widths[index]) / 2 * zoom
+            elif align == "right":
+                line_x += (block_width - widths[index]) * zoom
+            line_y = y + index * advance
+            if letter_spacing:
+                cursor = line_x
+                for char in line:
+                    self.doc_canvas.create_text(
+                        cursor, line_y, text=char, fill=color,
+                        font=draw_font, anchor="nw",
+                    )
+                    cursor += draw_font.measure(char) + letter_spacing
+            else:
+                self.doc_canvas.create_text(
+                    line_x, line_y, text=line, fill=color, font=draw_font,
+                    anchor="nw",
+                )
+
+    def _draw_record(self, record, dx=0.0, dy=0.0, stretch_width=None):
         kind = record["type"]
+        zoom = self.zoom
+        self._record_offsets[id(record)] = (dx, dy)
         if kind == "line":
+            coords = list(record["coords"])
+            for index in range(0, len(coords), 2):
+                coords[index] += dx
+                coords[index + 1] += dy
             self.doc_canvas.create_line(
-                *record["coords"], fill=record["color"], width=record["width"],
+                *[value * zoom for value in coords],
+                fill=record["color"],
+                width=max(1, round(record["width"] * zoom)),
                 capstyle="round", joinstyle="round",
             )
         elif kind == "dot":
-            x, y, radius = record["x"], record["y"], record["r"]
+            x = (record["x"] + dx) * zoom
+            y = (record["y"] + dy) * zoom
+            radius = record["r"] * zoom
             self.doc_canvas.create_oval(
                 x - radius, y - radius, x + radius, y + radius,
                 fill=record["color"], outline="",
             )
         elif kind == "rect":
+            x2 = (
+                record["x1"] + stretch_width
+                if stretch_width is not None
+                else record["x2"]
+            )
             self.doc_canvas.create_rectangle(
-                record["x1"], record["y1"], record["x2"], record["y2"],
+                (record["x1"] + dx) * zoom, (record["y1"] + dy) * zoom,
+                (x2 + dx) * zoom, (record["y2"] + dy) * zoom,
                 outline=record.get("border_color")
                 or record.get("color") or BRUSH_COLOR,
-                width=record.get("border_width", 2),
+                width=max(1, round(record.get("border_width", 2) * zoom)),
+                fill=record.get("background") or "",
+            )
+        elif kind == "ellipse":
+            x2 = (
+                record["x1"] + stretch_width
+                if stretch_width is not None
+                else record["x2"]
+            )
+            self.doc_canvas.create_oval(
+                (record["x1"] + dx) * zoom, (record["y1"] + dy) * zoom,
+                (x2 + dx) * zoom, (record["y2"] + dy) * zoom,
+                outline=record.get("border_color")
+                or record.get("color") or BRUSH_COLOR,
+                width=max(1, round(record.get("border_width", 2) * zoom)),
                 fill=record.get("background") or "",
             )
         elif kind == "text":
-            self.doc_canvas.create_text(
-                record["x"], record["y"], text=record["text"],
-                fill=record["color"], font=("Segoe UI", 14), anchor="nw",
+            self._draw_text_record(record, dx, dy)
+        elif kind == "image":
+            photo = self._image_refs.get(id(record))
+            if photo is None:
+                photo = self._make_photo(record)
+                if photo is None:
+                    return
+                self._image_refs[id(record)] = photo
+            image_width = (
+                stretch_width
+                if stretch_width is not None
+                else int(record.get("width", photo.width()))
             )
+            width = max(round(image_width * zoom), 1)
+            height = max(
+                round(int(record.get("height", photo.height())) * zoom), 1
+            )
+            photo = self._scale_photo(record, photo, width, height)
+            x = (record["x"] + dx) * zoom
+            y = (record["y"] + dy) * zoom
+            self.doc_canvas.create_image(x, y, image=photo, anchor="nw")
+            border_width = record.get("border_width", 0)
+            if border_width > 0:
+                self.doc_canvas.create_rectangle(
+                    x, y, x + width, y + height,
+                    outline=record.get("border_color") or BRUSH_COLOR,
+                    width=max(1, round(border_width * zoom)),
+                )
 
     def _render_document(self):
         self.doc_canvas.delete("all")
+        self._image_refs.clear()
+        self._image_scaled.clear()
+        self._text_areas.clear()
+        self._record_offsets.clear()
         self._draw_layers(self.layers)
+        self._draw_guides()
+        self._draw_marquee_overlay()
 
-    def _draw_layers(self, layers):
+    def _draw_layers(
+        self, layers, dx=0.0, dy=0.0, stretch_width=None,
+        children_dx=None, children_dy=None,
+    ):
+        base_dx = dx if children_dx is None else children_dx
+        base_dy = dy if children_dy is None else children_dy
         for layer in layers:
             if not layer.visible:
                 continue
+            self._draw_layer_background(layer, dx, dy, stretch_width)
             for record in layer.items:
-                self._draw_record(record)
-            self._draw_layers(layer.children)
+                self._draw_record(record, dx, dy, stretch_width)
+            offsets = {}
+            display = self._layer_display(layer)
+            if layer.children and display == "flex":
+                offsets = self._flex_child_offsets(layer)
+            elif layer.children and display == "grid":
+                offsets = self._grid_child_offsets(layer)
+            for child in layer.children:
+                if not child.visible:
+                    continue
+                child_dx, child_dy, child_stretch = offsets.get(
+                    id(child), (0.0, 0.0, None)
+                )
+                keep_design = (
+                    display == "flex"
+                    and child.children
+                    and self._is_flex_fill_layer(child)
+                )
+                self._draw_layers(
+                    [child],
+                    base_dx + child_dx,
+                    base_dy + child_dy,
+                    child_stretch,
+                    children_dx=base_dx if keep_design else None,
+                    children_dy=base_dy if keep_design else None,
+                )
+
+    def _is_flex_fill_layer(self, layer):
+        if (
+            self._is_text_layer(layer)
+            or not any(
+                record.get("type") in ("rect", "ellipse", "image")
+                for record in layer.items
+            )
+        ):
+            return False
+        bounds = self._record_bounds(layer.items)
+        if bounds is None:
+            return False
+        return bounds[2] - bounds[0] <= 1
+
+    def _flex_child_bounds(self, child):
+        box = self._layer_css_box(child)
+        if box is None:
+            box = self._group_css_box(child)
+        if box is None:
+            return None
+        return (
+            box["x"], box["y"],
+            box["x"] + box["width"], box["y"] + box["height"],
+        )
+
+    def _flex_child_offsets(self, layer):
+        box = self._layer_css_box(layer)
+        if box is None:
+            box = self._group_css_box(layer)
+        children = [child for child in layer.children if child.visible]
+        if not children:
+            return {}
+        bounds = [self._flex_child_bounds(child) for child in children]
+        widths = [
+            max(bound[2] - bound[0], 0) if bound else 0
+            for bound in bounds
+        ]
+        justify = self._layer_justify(layer)
+        gap = self._layer_gap(layer)
+        fills = [self._is_flex_fill_layer(child) for child in children]
+        count = len(children)
+        if any(fills):
+            margins = []
+            for index, bound in enumerate(bounds):
+                if justify != "left" or index == 1 or bound is None:
+                    margins.append(0.0)
+                else:
+                    margins.append(bound[0] - box["x"])
+            fixed = sum(
+                width for width, fill in zip(widths, fills) if not fill
+            )
+            used = fixed + sum(margins) + gap * (count - 1)
+            share = max(box["width"] - used, 0) / sum(fills)
+            offsets = {}
+            cursor = box["x"]
+            for child, bound, width, fill, margin in zip(
+                children, bounds, widths, fills, margins
+            ):
+                draw_width = share if fill else width
+                start = cursor + margin
+                if bound is not None:
+                    offsets[id(child)] = (
+                        start - bound[0],
+                        0.0,
+                        share if fill else None,
+                    )
+                cursor = start + draw_width + gap
+            return offsets
+        offsets = {}
+        if justify == "left":
+            cursor = box["x"]
+            for index, (child, bound, width) in enumerate(
+                zip(children, bounds, widths)
+            ):
+                left = 0.0
+                if index != 1 and bound is not None:
+                    left = bound[0] - box["x"]
+                start = cursor + left
+                if bound is not None:
+                    offsets[id(child)] = (start - bound[0], 0.0, None)
+                cursor = start + width + gap
+            return offsets
+        total = sum(widths) + gap * (count - 1)
+        free = box["width"] - total
+        if justify == "between" and count > 1:
+            step = gap + free / (count - 1)
+        else:
+            step = gap
+        if justify == "center":
+            cursor = box["x"] + free / 2
+        elif justify == "right":
+            cursor = box["x"] + free
+        else:
+            cursor = box["x"]
+        for child, bound, width in zip(children, bounds, widths):
+            if bound is not None:
+                offsets[id(child)] = (cursor - bound[0], 0.0, None)
+            cursor += width + step
+        return offsets
+
+    def _grid_child_offsets(self, layer):
+        gap = self._layer_gap(layer)
+        if not gap:
+            return {}
+        offsets = {}
+        row = 0
+        for child in layer.children:
+            if not child.visible:
+                continue
+            offsets[id(child)] = (0.0, gap * row, None)
+            row += 1
+        return offsets
+
+    def _draw_layer_background(
+        self, layer, dx=0.0, dy=0.0, stretch_width=None
+    ):
+        image = layer.background_image
+        if not image or not image.get("data"):
+            return
+        x1, y1, x2, y2 = self._layer_background_bounds(layer)
+        if stretch_width is not None:
+            x2 = x1 + stretch_width
+        x1 += dx
+        y1 += dy
+        zoom = self.zoom
+        width = max(round((x2 - x1) * zoom), 1)
+        height = max(round((y2 - y1) * zoom), 1)
+        photo = self._background_photo(image, width, height)
+        if photo is None:
+            return
+        self.doc_canvas.create_image(
+            x1 * zoom, y1 * zoom, image=photo, anchor="nw"
+        )
+
+    def _layer_content_bounds(self, layer):
+        records = list(layer.items)
+
+        def collect(item_layer):
+            for child in item_layer.children:
+                if not child.visible:
+                    continue
+                records.extend(child.items)
+                collect(child)
+
+        collect(layer)
+        return self._record_bounds(records)
+
+    def _layer_background_bounds(self, layer):
+        records = list(layer.items)
+
+        def collect(item_layer):
+            for child in item_layer.children:
+                if not child.visible:
+                    continue
+                records.extend(child.items)
+                collect(child)
+
+        collect(layer)
+        bounds = self._record_bounds(records)
+        if bounds is None:
+            return (0, 0, self.content_width, self.content_height)
+        x1, y1, x2, y2 = bounds
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            return (0, 0, self.content_width, self.content_height)
+        return bounds
+
+    def _new_document(self, _event=None):
+        self._commit_text_editor()
+        if not self._confirm_save_changes():
+            return
+        self._hide_help_tab()
+        self._new_doc_counter += 1
+        self.layers = []
+        self.layer_counter = 0
+        self.active_layer = None
+        self.selected_layers = []
+        self._selection_anchor = None
+        self.history = []
+        self._stroke = None
+        self._last_point = None
+        self._temp_ids = []
+        self._rect_start = None
+        self._rect_preview = None
+        self.marquee_region = None
+        self._marquee_start = None
+        self._moving_guide = None
+        self._guide_move_start = 0
+        self._drag_layer = None
+        self.guides = []
+        self.guides_visible = True
+        self.zoom = 1.0
+        self.content_full = False
+        self.body_font_family = "none"
+        self.body_font_family_var.set("none")
+        self.doc_path = None
+        self.doc_name = f"Chưa có tên-{self._new_doc_counter}"
+        self._set_content_size(*CONTENT_SIZE)
+        self._add_layer(record=False)
+        self.saved_signature = self._document_signature()
+        self._render_document()
+        self._layout_content_viewport()
+        self._refresh_doc_tab()
 
     def _open_document(self, _event=None):
+        self._commit_text_editor()
         if not self._confirm_save_changes():
             return
         path = filedialog.askopenfilename(
@@ -1695,15 +5079,52 @@ class App(tk.Tk):
         self._temp_ids = []
         self.doc_path = path
         self.doc_name = os.path.splitext(os.path.basename(path))[0]
+        content_width = data.get("content_width")
+        content_height = data.get("content_height")
+        if not (
+            isinstance(content_width, int)
+            and 100 <= content_width <= 6000
+            and isinstance(content_height, int)
+            and 100 <= content_height <= 6000
+        ):
+            content_width, content_height = CONTENT_SIZE
+        content_full = data.get("content_full", False)
+        self.content_full = content_full if isinstance(content_full, bool) else False
+        self._set_content_size(content_width, content_height)
+        loaded_guides = []
+        for guide in data.get("guides", []):
+            if not isinstance(guide, dict):
+                continue
+            orient = guide.get("orient")
+            pos = guide.get("pos")
+            limit = content_height if orient == "h" else content_width
+            if (
+                orient in ("h", "v")
+                and isinstance(pos, int)
+                and 0 <= pos <= limit
+            ):
+                loaded_guides.append({"orient": orient, "pos": pos})
+        self.guides = loaded_guides
+        body_font = data.get("body_font_family", "none")
+        if not isinstance(body_font, str):
+            body_font = "none"
+        body_font = body_font.strip()[:60]
+        if not body_font or body_font.lower() == "none":
+            body_font = "none"
+        self.body_font_family = body_font
+        self.body_font_family_var.set(body_font)
+        self.marquee_region = None
+        self._marquee_start = None
         self.saved_signature = self._document_signature()
+        self._hide_help_tab()
         self._refresh_layers()
         self._render_document()
         self._refresh_doc_tab()
 
     def _save_document(self, _event=None):
-        if self.doc_path:
-            path = self.doc_path
-        else:
+        self._commit_text_editor()
+        path = self.doc_path
+        if not path:
             path = filedialog.asksaveasfilename(
                 parent=self,
                 title="Lưu tài liệu",
@@ -1713,10 +5134,142 @@ class App(tk.Tk):
             )
             if not path:
                 return False
+        return self._write_document_file(path)
 
+    def _save_document_as(self, _event=None):
+        self._commit_text_editor()
+        initial = (
+            os.path.basename(self.doc_path)
+            if self.doc_path
+            else f"{self.doc_name}.dbw"
+        )
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Lưu tài liệu khác",
+            defaultextension=".dbw",
+            initialfile=initial,
+            filetypes=[
+                ("DBW Document", "*.dbw"),
+                ("Hình ảnh JPG", "*.jpg *.jpeg"),
+                ("Tất cả tệp", "*.*"),
+            ],
+        )
+        if not path:
+            return False
+        extension = os.path.splitext(path)[1].lower()
+        if extension in (".jpg", ".jpeg"):
+            return self._save_page_image(path)
+        return self._write_document_file(path)
+
+    def _save_page_image(self, path):
+        if Image is None or ImageGrab is None:
+            messagebox.showerror(
+                "Lỗi lưu ảnh",
+                "Cần cài Pillow để lưu trang thiết kế thành ảnh JPG.",
+                parent=self,
+            )
+            return False
+        self._commit_text_editor()
+        self._hide_help_tab()
+        self.update_idletasks()
+        if not self.winfo_viewable():
+            messagebox.showerror(
+                "Lỗi lưu ảnh",
+                "Cần mở cửa sổ ứng dụng để chụp trang thiết kế.",
+                parent=self,
+            )
+            return False
+        try:
+            image = self._render_page_image()
+            image.convert("RGB").save(path, format="JPEG", quality=95)
+        except Exception as error:
+            messagebox.showerror("Lỗi lưu ảnh", str(error), parent=self)
+            return False
+        self._flash_status(
+            f"Đã lưu ảnh {os.path.basename(path)}"
+        )
+        return True
+
+    @staticmethod
+    def _snapshot_offsets(total, view):
+        if total <= view:
+            return [0]
+        offsets = [0]
+        while offsets[-1] + view < total:
+            offsets.append(offsets[-1] + view)
+        if offsets[-1] + view > total:
+            offsets[-1] = total - view
+        return offsets
+
+    def _render_page_image(self):
+        """Render the whole page at 1:1 by capturing tiles of a scratch window."""
+        page_w = max(int(round(self.content_width)), 1)
+        page_h = max(int(round(self.content_height)), 1)
+        screen_w = max(int(self.winfo_screenwidth()), 1)
+        screen_h = max(int(self.winfo_screenheight()), 1)
+        view_w = min(page_w, 1200, max(screen_w - 120, 240))
+        view_h = min(page_h, 900, max(screen_h - 180, 180))
+        snapshot = tk.Toplevel(self)
+        snapshot.overrideredirect(True)
+        snapshot.geometry(f"{view_w}x{view_h}+20+20")
+        try:
+            snapshot.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        canvas = tk.Canvas(
+            snapshot,
+            width=view_w,
+            height=view_h,
+            bg=DOC_BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        canvas.pack(fill="both", expand=True)
+        canvas.configure(scrollregion=(0, 0, page_w, page_h))
+        previous_canvas = self.doc_canvas
+        previous_zoom = self.zoom
+        self.doc_canvas = canvas
+        self.zoom = 1.0
+        try:
+            self._draw_layers(self.layers)
+            snapshot.update_idletasks()
+            snapshot.update()
+            image = Image.new("RGB", (page_w, page_h), DOC_BG)
+            hwnd = snapshot.winfo_id()
+            for offset_y in self._snapshot_offsets(page_h, view_h):
+                for offset_x in self._snapshot_offsets(page_w, view_w):
+                    canvas.xview_moveto(offset_x / page_w)
+                    canvas.yview_moveto(offset_y / page_h)
+                    snapshot.update_idletasks()
+                    snapshot.update()
+                    origin_x = max(int(round(canvas.canvasx(0))), 0)
+                    origin_y = max(int(round(canvas.canvasy(0))), 0)
+                    width = min(view_w, page_w - origin_x)
+                    height = min(view_h, page_h - origin_y)
+                    if width <= 0 or height <= 0:
+                        continue
+                    shot = ImageGrab.grab(window=hwnd)
+                    image.paste(
+                        shot.crop((0, 0, width, height)),
+                        (origin_x, origin_y),
+                    )
+            return image
+        finally:
+            self.doc_canvas = previous_canvas
+            self.zoom = previous_zoom
+            snapshot.destroy()
+            self._render_document()
+            self._layout_content_viewport()
+
+    def _write_document_file(self, path):
         data = {
             "format": "dbw",
             "version": 2,
+            "content_width": self.content_width,
+            "content_height": self.content_height,
+            "content_full": self.content_full,
+            "body_font_family": self.body_font_family,
+            "guides": [dict(guide) for guide in self.guides],
             "layers": [self._layer_state(layer) for layer in self.layers],
             "active_layer_path": self._layer_path(self.active_layer),
             "layer_counter": self.layer_counter,
@@ -1735,6 +5288,7 @@ class App(tk.Tk):
         return True
 
     def _open_export_window(self):
+        self._commit_text_editor()
         window = self._export_window
         if window is not None and window.winfo_exists():
             window.lift()
@@ -1765,7 +5319,8 @@ class App(tk.Tk):
         ).pack(anchor="w")
         tk.Label(
             body,
-            text="Xem trước HTML và CSS, xuất cấu trúc lớp thành tệp HTML.",
+            text="Xem trước HTML và CSS, xuất tệp HTML kèm tệp"
+            " style.css liên kết.",
             font=("Segoe UI", 9),
             fg=MUTED,
             bg=PANEL_BG,
@@ -1957,14 +5512,48 @@ class App(tk.Tk):
             messagebox.showerror("Lỗi xuất tệp", str(error), parent=window)
             return
         self._close_export_window(window)
-        messagebox.showinfo("Export", f"Đã xuất tệp HTML:\n{path}", parent=self)
+        messagebox.showinfo(
+            "Export",
+            f"Đã xuất tệp HTML:\n{path}\nCSS:\n"
+            f"{os.path.join(os.path.dirname(os.path.abspath(path)), 'style.css')}",
+            parent=self,
+        )
 
     def _build_export_content(self):
         html_lines = []
         self._collect_html_layers(self.layers, html_lines, 1)
+        flow, body_padding = self._export_flow()
         css_lines = []
-        self._collect_css_rules(self.layers, css_lines)
-        return "\n".join(html_lines), "\n".join(css_lines)
+        self._collect_css_rules(self.layers, css_lines, flow)
+        page_lines = [
+            "body {",
+            "  margin: 0;",
+        ]
+        if body_padding:
+            page_lines.append(
+                f"  padding-top: {self._css_num(body_padding)}px;"
+            )
+            page_lines.append("  box-sizing: border-box;")
+        if not self.content_full:
+            page_lines.append(
+                f"  width: {self._css_num(self.content_width)}px;"
+            )
+            page_lines.append(
+                f"  height: {self._css_num(self.content_height)}px;"
+            )
+        if self.body_font_family != "none":
+            page_lines.append(
+                "  font-family: "
+                f"{self._css_font_family(self.body_font_family)};"
+            )
+        page_lines.append("}")
+        page_css = "\n".join(page_lines)
+        css = "\n".join(css_lines)
+        if css:
+            css = f"{page_css}\n\n{css}"
+        else:
+            css = page_css
+        return "\n".join(html_lines), css
 
     def _write_html(self, path):
         html_body, css = self._build_export_content()
@@ -1976,9 +5565,7 @@ class App(tk.Tk):
                 "<head>",
                 '<meta charset="utf-8">',
                 f"<title>{title}</title>",
-                "<style>",
-                css,
-                "</style>",
+                '<link rel="stylesheet" href="style.css">',
                 "</head>",
                 "<body>",
                 html_body,
@@ -1987,8 +5574,80 @@ class App(tk.Tk):
                 "",
             ]
         )
+        folder = os.path.dirname(os.path.abspath(path))
+        self._export_images(folder)
+        with open(
+            os.path.join(folder, "style.css"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(css + "\n")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(document)
+
+    def _visible_image_layers(self, layers):
+        for layer in layers:
+            if not layer.visible:
+                continue
+            if self._is_image_layer(layer):
+                yield layer
+            yield from self._visible_image_layers(layer.children)
+
+    def _image_export_filename(self, layer):
+        name = self._layer_class_name(layer.name)
+        cleaned = "".join(
+            "-" if char in '\\/:*?"<>|' else char for char in name
+        ).strip(" .")
+        return f"{cleaned or 'image'}.jpg"
+
+    def _background_export_filename(self, layer):
+        name = self._layer_class_name(layer.name)
+        cleaned = "".join(
+            "-" if char in '\\/:*?"<>|' else char for char in name
+        ).strip(" .")
+        return f"{cleaned or 'layer'}-bg.jpg"
+
+    def _visible_layers(self, layers):
+        for layer in layers:
+            if not layer.visible:
+                continue
+            yield layer
+            yield from self._visible_layers(layer.children)
+
+    def _export_images(self, folder):
+        entries = []
+        for layer in self._visible_image_layers(self.layers):
+            images = [
+                record
+                for record in layer.items
+                if record.get("type") == "image"
+            ]
+            data = images[-1].get("data") if images else ""
+            if data:
+                entries.append((self._image_export_filename(layer), data))
+        for layer in self._visible_layers(self.layers):
+            background = layer.background_image
+            if background and background.get("data"):
+                entries.append((
+                    self._background_export_filename(layer),
+                    background["data"],
+                ))
+        if not entries:
+            return
+        if Image is None:
+            raise OSError("Cần cài Pillow để xuất hình ảnh sang JPG.")
+        for file_name, data in entries:
+            self._write_jpeg(os.path.join(folder, file_name), data)
+
+    def _write_jpeg(self, target, data):
+        raw = base64.b64decode(data)
+        with Image.open(BytesIO(raw)) as image:
+            if image.mode in ("RGBA", "LA", "P"):
+                image = image.convert("RGBA")
+                background = Image.new("RGB", image.size, "white")
+                background.paste(image, mask=image.getchannel("A"))
+                output = background
+            else:
+                output = image.convert("RGB")
+            output.save(target, format="JPEG", quality=90)
 
     def _collect_html_layers(self, layers, lines, depth):
         indent = "  " * depth
@@ -2002,21 +5661,319 @@ class App(tk.Tk):
                 lines.append(f'{indent}<div class="{class_name}">')
                 self._collect_html_layers(layer.children, lines, depth + 1)
                 lines.append(f"{indent}</div>")
+            elif self._layer_text_style(layer) is not None:
+                for record in layer.items:
+                    if record.get("type") != "text":
+                        continue
+                    content = html.escape(
+                        str(record.get("text", ""))
+                    ).replace("\n", "<br>")
+                    tag = self._text_tag(record)
+                    if class_name == tag:
+                        lines.append(f"{indent}<{tag}>{content}</{tag}>")
+                    else:
+                        lines.append(
+                            f'{indent}<{tag} class="{class_name}">'
+                            f"{content}</{tag}>"
+                        )
+            elif self._is_image_layer(layer):
+                image = [
+                    record
+                    for record in layer.items
+                    if record.get("type") == "image"
+                ][-1]
+                if image.get("data"):
+                    file_name = html.escape(
+                        self._image_export_filename(layer), quote=True
+                    )
+                    alt = html.escape(
+                        self._layer_class_name(layer.name), quote=True
+                    )
+                    lines.append(
+                        f'{indent}<img class="{class_name}" '
+                        f'src="{file_name}" alt="{alt}">'
+                    )
             else:
                 lines.append(f'{indent}<div class="{class_name}"></div>')
 
-    def _collect_css_rules(self, layers, lines):
+    def _layer_text_style(self, layer):
+        if any(r.get("type") in ("rect", "ellipse", "image") for r in layer.items):
+            return None
+        texts = [r for r in layer.items if r.get("type") == "text"]
+        if not texts:
+            return None
+        record = texts[-1]
+        _font, _lines, widths, _advance, _spacing, height = (
+            self._text_metrics(record)
+        )
+        frame = self._text_frame(record)
+        if frame is not None:
+            left = frame[0]
+            width = frame[2] - frame[0]
+        else:
+            left = record["x"]
+            width = max(widths, default=0)
+        return {
+            "x": left,
+            "y": record["y"],
+            "width": width,
+            "height": height,
+            "font_family": self._text_family(record),
+            "color": record.get("color") or TEXT,
+            "font_size": int(record.get("font_size", 14)),
+            "font_weight": self._text_weight_value(record),
+            "line_height": round(self._text_line_height(record), 2),
+            "letter_spacing": self._text_letter_spacing(record),
+            "text_transform": self._text_transform(record),
+            "text_align": self._text_align(record),
+            "text_frame": frame,
+            "tag": self._text_tag(record),
+        }
+
+    def _export_visual_box(self, layer):
+        images = [
+            record for record in layer.items if record.get("type") == "image"
+        ]
+        if images:
+            record = images[-1]
+            return (
+                record["x"],
+                record["y"],
+                max(float(record.get("width", 0)), 1),
+                max(float(record.get("height", 0)), 1),
+            )
+        text_style = self._layer_text_style(layer)
+        if text_style is not None:
+            return (
+                text_style["x"],
+                text_style["y"],
+                text_style["width"],
+                text_style["height"],
+            )
+        box = self._layer_css_box(layer)
+        if box is not None:
+            return (box["x"], box["y"], box["width"], box["height"])
+        if layer.background_image:
+            box = self._background_css_box(layer)
+            return (box["x"], box["y"], box["width"], box["height"])
+        return None
+
+    def _export_flow(self):
+        """Compute flow margins from the design positions of sibling items."""
+        flow = {}
+
+        def walk(layers, origin_x, origin_y, parent=None):
+            items = []
+            child_offsets = {}
+            if parent is not None and self._layer_display(parent) == "flex":
+                child_offsets = self._flex_child_offsets(parent)
+
+            def collect(seq_layers):
+                for layer in seq_layers:
+                    if not layer.visible:
+                        continue
+                    if layer.children:
+                        shapes = [
+                            record
+                            for record in layer.items
+                            if record.get("type") in ("rect", "ellipse")
+                        ]
+                        bounds = self._layer_content_bounds(layer)
+                        if shapes:
+                            shape = shapes[-1]
+                            bounds = (
+                                shape["x1"],
+                                shape["y1"],
+                                shape["x2"],
+                                shape["y2"],
+                            )
+                        if bounds is None:
+                            if not layer.background_image:
+                                continue
+                            bounds = (
+                                0.0,
+                                0.0,
+                                self.content_width,
+                                self.content_height,
+                            )
+                        x1, y1, x2, y2 = bounds
+                        items.append({
+                            "layer": layer,
+                            "x": x1,
+                            "y": y1,
+                            "width": max(x2 - x1, 1),
+                            "height": max(y2 - y1, 1),
+                        })
+                        child_x = x1
+                        offset = child_offsets.get(id(layer))
+                        if offset and self._is_flex_fill_layer(layer):
+                            child_x = x1 + offset[0]
+                        child_flow, child_padding = walk(
+                            layer.children, child_x, y1, layer
+                        )
+                        flow[id(layer)] = {
+                            "padding_top": child_padding,
+                        }
+                        flow.update(child_flow)
+                        continue
+                    box = self._export_visual_box(layer)
+                    if box is None:
+                        continue
+                    items.append({
+                        "layer": layer,
+                        "x": box[0],
+                        "y": box[1],
+                        "width": box[2],
+                        "height": box[3],
+                    })
+
+            collect(layers)
+            padding = 0
+            if items:
+                padding = max(items[0]["y"] - origin_y, 0)
+            for index, item in enumerate(items):
+                entry = flow.setdefault(id(item["layer"]), {})
+                entry["left"] = item["x"] - origin_x
+                gap = 0
+                if index + 1 < len(items):
+                    following = items[index + 1]
+                    gap = following["y"] - (item["y"] + item["height"])
+                entry["gap"] = gap
+            return flow, padding
+
+        return walk(self.layers, 0.0, 0.0)
+
+    def _collect_css_rules(
+        self, layers, lines, flow, parent_display=None, parent_justify="left"
+    ):
+        visible_index = 0
         for layer in layers:
             if not layer.visible:
                 continue
-            box = self._layer_css_box(layer)
-            if box is not None:
+            flex_child = parent_display == "flex"
+            flex_justify = flex_child and parent_justify != "left"
+            skip_bottom = flex_child and visible_index == 0
+            skip_left = flex_child and (visible_index == 1 or flex_justify)
+            fill_child = flex_child and self._is_flex_fill_layer(layer)
+            visible_index += 1
+            entry = flow.get(id(layer), {})
+            left = entry.get("left", 0.0)
+            gap = entry.get("gap", 0.0)
+            class_name = self._layer_class_name(layer.name)
+            if self._is_image_layer(layer):
+                images = [
+                    record
+                    for record in layer.items
+                    if record.get("type") == "image"
+                ]
+                if images:
+                    self._append_image_css(
+                        lines,
+                        class_name,
+                        images[-1],
+                        left,
+                        gap,
+                        skip_left=skip_left,
+                        skip_bottom=skip_bottom,
+                        fill=fill_child,
+                    )
+                self._collect_css_rules(layer.children, lines, flow)
+                continue
+            text_style = self._layer_text_style(layer)
+            is_group = bool(layer.children)
+            box = None if text_style is not None else self._layer_css_box(layer)
+            if (
+                box is None
+                and text_style is None
+                and is_group
+                and id(layer) in flow
+            ):
+                box = self._group_css_box(layer)
+            elif box is None and text_style is None and layer.background_image:
+                box = self._background_css_box(layer)
+            if text_style is not None:
                 if lines:
                     lines.append("")
-                class_name = self._layer_class_name(layer.name)
+                frame = text_style["text_frame"]
+                selector = (
+                    text_style["tag"]
+                    if class_name == text_style["tag"]
+                    else f".{class_name}"
+                )
+                lines.append(f"{selector} {{")
+                lines.append("  margin: 0;")
+                if not skip_bottom:
+                    lines.append(
+                        f"  margin-bottom: {self._css_num(gap)}px;"
+                    )
+                if text_style["text_align"] == "left" and not skip_left:
+                    lines.append(
+                        f"  margin-left: {self._css_num(left)}px;"
+                    )
+                if frame is not None:
+                    lines.append(
+                        "  width: "
+                        f"{self._css_num(frame[2] - frame[0])}px;"
+                    )
+                lines.append(f"  color: {text_style['color']};")
+                if text_style["font_family"] != "none":
+                    lines.append(
+                        "  font-family: "
+                        f"{self._css_font_family(text_style['font_family'])};"
+                    )
+                lines.append(
+                    f"  font-size: {self._css_num(text_style['font_size'])}px;"
+                )
+                lines.append(f"  font-weight: {text_style['font_weight']};")
+                lines.append(
+                    "  line-height: "
+                    f"{self._css_num(text_style['line_height'])};"
+                )
+                lines.append(
+                    "  letter-spacing: "
+                    f"{self._css_num(text_style['letter_spacing'])}px;"
+                )
+                if text_style["text_transform"] != "none":
+                    lines.append(
+                        "  text-transform: "
+                        f"{text_style['text_transform']};"
+                    )
+                if text_style["text_align"] != "left" or frame is not None:
+                    lines.append(
+                        "  text-align: "
+                        f"{text_style['text_align']};"
+                    )
+                lines.append("}")
+            elif box is not None:
+                if lines:
+                    lines.append("")
                 lines.append(f".{class_name} {{")
-                lines.append(f"  width: {self._css_num(box['width'])}px;")
-                lines.append(f"  height: {self._css_num(box['height'])}px;")
+                if layer.children and self._layer_align(layer) != "left":
+                    lines.append("  margin: 0;")
+                    if not skip_bottom:
+                        lines.append(
+                            f"  margin-bottom: {self._css_num(gap)}px;"
+                        )
+                else:
+                    self._append_flow_margins(
+                        lines, left, gap,
+                        skip_left=skip_left,
+                        skip_bottom=skip_bottom,
+                    )
+                if fill_child:
+                    lines.append("  flex: 1;")
+                padding_top = entry.get("padding_top", 0)
+                if padding_top:
+                    lines.append(
+                        f"  padding-top: {self._css_num(padding_top)}px;"
+                    )
+                if not fill_child:
+                    lines.append(
+                        f"  width: {self._css_num(box['width'])}px;"
+                    )
+                lines.append(
+                    f"  height: {self._css_num(box['height'])}px;"
+                )
                 if box["background"]:
                     lines.append(f"  background: {box['background']};")
                 if box["border_width"] > 0 and box["border_color"]:
@@ -2024,29 +5981,187 @@ class App(tk.Tk):
                         f"  border: {self._css_num(box['border_width'])}px "
                         f"solid {box['border_color']};"
                     )
+                if box.get("border_radius"):
+                    lines.append(
+                        f"  border-radius: {box['border_radius']};"
+                    )
+                if layer.background_image:
+                    image = layer.background_image
+                    lines.append(
+                        '  background-image: url("'
+                        f'{self._background_export_filename(layer)}");'
+                    )
+                    lines.append(
+                        "  background-size: "
+                        f"{self._background_setting(image, 'size')};"
+                    )
+                    lines.append(
+                        "  background-position: "
+                        f"{self._background_setting(image, 'position')};"
+                    )
+                    lines.append(
+                        "  background-repeat: "
+                        f"{self._background_setting(image, 'repeat')};"
+                    )
+                if layer.children:
+                    lines.append(
+                        f"  display: {self._layer_display(layer)};"
+                    )
+                    self._append_group_gap(lines, layer)
+                    self._append_group_justify(lines, layer)
+                    self._append_group_align(lines, layer)
                 lines.append("}")
-            self._collect_css_rules(layer.children, lines)
+            elif layer.children:
+                display = self._layer_display(layer)
+                align = self._layer_align(layer)
+                justify = self._layer_justify(layer)
+                gap = self._layer_gap(layer)
+                if (
+                    display != "block"
+                    or align != "left"
+                    or (display == "flex" and justify != "left")
+                    or (display in ("flex", "grid") and gap > 0)
+                ):
+                    if lines:
+                        lines.append("")
+                    lines.append(f".{class_name} {{")
+                    if display != "block":
+                        lines.append(f"  display: {display};")
+                    self._append_group_gap(lines, layer)
+                    self._append_group_justify(lines, layer)
+                    self._append_group_align(lines, layer)
+                    lines.append("}")
+            self._collect_css_rules(
+                layer.children,
+                lines,
+                flow,
+                self._layer_display(layer) if layer.children else None,
+                self._layer_justify(layer) if layer.children else "left",
+            )
+
+    def _append_group_gap(self, lines, layer):
+        if self._layer_display(layer) not in ("flex", "grid"):
+            return
+        gap = self._layer_gap(layer)
+        if gap:
+            lines.append(f"  gap: {self._css_num(gap)}px;")
+
+    def _append_group_justify(self, lines, layer):
+        if self._layer_display(layer) != "flex":
+            return
+        value = {
+            "left": "flex-start",
+            "center": "center",
+            "right": "flex-end",
+            "between": "space-between",
+        }.get(self._layer_justify(layer), "flex-start")
+        lines.append(f"  justify-content: {value};")
+
+    def _append_group_align(self, lines, layer):
+        align = self._layer_align(layer)
+        if align == "center":
+            lines.append("  margin-left: auto;")
+            lines.append("  margin-right: auto;")
+        elif align == "right":
+            lines.append("  margin-left: auto;")
+
+    def _append_flow_margins(
+        self, lines, left, gap, skip_left=False, skip_bottom=False
+    ):
+        lines.append("  margin: 0;")
+        if not skip_bottom:
+            lines.append(f"  margin-bottom: {self._css_num(gap)}px;")
+        if not skip_left:
+            lines.append(f"  margin-left: {self._css_num(left)}px;")
+
+    def _append_image_css(
+        self, lines, class_name, record, left, gap,
+        skip_left=False, skip_bottom=False, fill=False,
+    ):
+        if lines:
+            lines.append("")
+        lines.append(f".{class_name} {{")
+        self._append_flow_margins(
+            lines, left, gap,
+            skip_left=skip_left,
+            skip_bottom=skip_bottom,
+        )
+        if fill:
+            lines.append("  flex: 1;")
+        lines.append("  display: block;")
+        if not fill:
+            lines.append(
+                "  width: "
+                f"{self._css_num(record.get('width', 0))}px;"
+            )
+        lines.append(
+            "  height: "
+            f"{self._css_num(record.get('height', 0))}px;"
+        )
+        border_width = record.get("border_width", 0)
+        if border_width > 0:
+            lines.append(
+                f"  border: {self._css_num(border_width)}px solid "
+                f"{record.get('border_color') or BRUSH_COLOR};"
+            )
+        lines.append("}")
 
     def _layer_css_box(self, layer):
-        rects = [r for r in layer.items if r.get("type") == "rect"]
-        if rects:
-            rect = rects[-1]
-            return {
-                "width": max(rect["x2"] - rect["x1"], 1),
-                "height": max(rect["y2"] - rect["y1"], 1),
-                "background": rect.get("background") or "",
+        shapes = [
+            r for r in layer.items if r.get("type") in ("rect", "ellipse")
+        ]
+        if shapes:
+            shape = shapes[-1]
+            box = {
+                "x": shape["x1"],
+                "y": shape["y1"],
+                "width": max(shape["x2"] - shape["x1"], 1),
+                "height": max(shape["y2"] - shape["y1"], 1),
+                "background": shape.get("background") or "",
                 "border_color": (
-                    rect.get("border_color")
-                    or rect.get("color")
+                    shape.get("border_color")
+                    or shape.get("color")
                     or BRUSH_COLOR
                 ),
-                "border_width": rect.get("border_width", 2),
+                "border_width": shape.get("border_width", 2),
             }
+            if shape.get("type") == "ellipse":
+                box["border_radius"] = "50%"
+            return box
         bounds = self._record_bounds(layer.items)
         if bounds is None:
             return None
         x1, y1, x2, y2 = bounds
         return {
+            "x": x1,
+            "y": y1,
+            "width": max(x2 - x1, 1),
+            "height": max(y2 - y1, 1),
+            "background": "",
+            "border_color": "",
+            "border_width": 0,
+        }
+
+    def _background_css_box(self, layer):
+        x1, y1, x2, y2 = self._layer_background_bounds(layer)
+        return {
+            "x": x1,
+            "y": y1,
+            "width": max(x2 - x1, 1),
+            "height": max(y2 - y1, 1),
+            "background": "",
+            "border_color": "",
+            "border_width": 0,
+        }
+
+    def _group_css_box(self, layer):
+        bounds = self._layer_content_bounds(layer)
+        if bounds is None:
+            bounds = (0.0, 0.0, self.content_width, self.content_height)
+        x1, y1, x2, y2 = bounds
+        return {
+            "x": x1,
+            "y": y1,
             "width": max(x2 - x1, 1),
             "height": max(y2 - y1, 1),
             "background": "",
@@ -2059,7 +6174,7 @@ class App(tk.Tk):
         ys = []
         for record in records:
             kind = record.get("type")
-            if kind == "rect":
+            if kind in ("rect", "ellipse"):
                 xs.extend((record["x1"], record["x2"]))
                 ys.extend((record["y1"], record["y2"]))
             elif kind == "line":
@@ -2071,8 +6186,18 @@ class App(tk.Tk):
                 xs.extend((record["x"] - radius, record["x"] + radius))
                 ys.extend((record["y"] - radius, record["y"] + radius))
             elif kind == "text":
-                xs.append(record["x"])
-                ys.append(record["y"])
+                _font, _lines, widths, _advance, _spacing, height = (
+                    self._text_metrics(record)
+                )
+                xs.extend((record["x"], record["x"] + max(widths, default=0)))
+                ys.extend((record["y"], record["y"] + height))
+            elif kind == "image":
+                xs.extend(
+                    (record["x"], record["x"] + record.get("width", 0))
+                )
+                ys.extend(
+                    (record["y"], record["y"] + record.get("height", 0))
+                )
         if not xs or not ys:
             return None
         return min(xs), min(ys), max(xs), max(ys)
@@ -2086,6 +6211,18 @@ class App(tk.Tk):
         if number.is_integer():
             return str(int(number))
         return f"{number:.2f}".rstrip("0").rstrip(".")
+
+    def _css_font_family(self, family):
+        raw = str(family).strip()
+        name = "".join(
+            char for char in raw if char not in '";{}\\\n\r'
+        ) or "Segoe UI"
+        if name.lower() in (
+            "serif", "sans-serif", "monospace", "cursive", "fantasy",
+            "system-ui",
+        ):
+            return name.lower()
+        return f'"{name}"'
 
     def _confirm_save_changes(self):
         if not self.dirty:
@@ -2108,6 +6245,7 @@ class App(tk.Tk):
         return True
 
     def _on_close(self):
+        self._commit_text_editor()
         if not self._confirm_save_changes():
             return
         self.destroy()
@@ -2119,18 +6257,62 @@ class App(tk.Tk):
         self.bind("<Control-Z>", self._undo)
         self.bind("<Control-j>", self._duplicate_layer)
         self.bind("<Control-J>", self._duplicate_layer)
+        self.bind("<Control-g>", self._group_selected_layers)
+        self.bind("<Control-G>", self._group_selected_layers)
         self.bind("<Control-s>", self._save_document)
+        self.bind("<Control-S>", self._save_document)
+        self.bind("<Control-Shift-s>", self._save_document_as)
+        self.bind("<Control-Shift-S>", self._save_document_as)
         self.bind("<Control-o>", self._open_document)
+        self.bind("<Control-O>", self._open_document)
+        self.bind("<Control-n>", self._new_document)
+        self.bind("<Control-N>", self._new_document)
+        self.bind("<Control-e>", lambda _e: self._open_export_window())
+        self.bind("<Control-E>", lambda _e: self._open_export_window())
+        self.bind("<Control-q>", lambda _e: self._on_close())
+        self.bind("<Control-Q>", lambda _e: self._on_close())
+        self.bind("<F1>", self._toggle_help_tab)
+        self.bind("<Control-semicolon>", self._toggle_guides)
         self.bind("<B1-Motion>", self._on_layer_drag, add="+")
         self.bind("<ButtonRelease-1>", self._on_layer_release, add="+")
         self.bind("<Button-1>", self._commit_rename_if_outside, add="+")
 
+    def start_maximized(self):
+        self.state("zoomed")
+        self.deiconify()
+        self.is_fullscreen = False
+        self.btn_fullscreen.configure(text="Toàn màn hình")
+        self.lift()
+        self.focus_force()
+        self.after(100, self._update_status)
+
     def enter_fullscreen(self):
         self.attributes("-fullscreen", True)
+        self.deiconify()
         self.is_fullscreen = True
         self.btn_fullscreen.configure(text="Cửa sổ")
         self._update_status()
+        self.lift()
         self.focus_force()
+        self.after(200, self._verify_fullscreen)
+
+    def _verify_fullscreen(self):
+        if not self.is_fullscreen:
+            return
+        self.update_idletasks()
+        if (
+            self.winfo_width() >= self.winfo_screenwidth()
+            and self.winfo_height() >= self.winfo_screenheight()
+        ):
+            return
+        self.attributes("-fullscreen", False)
+        self.after(50, self._reapply_fullscreen)
+
+    def _reapply_fullscreen(self):
+        if not self.is_fullscreen:
+            return
+        self.attributes("-fullscreen", True)
+        self.lift()
 
     def exit_fullscreen(self):
         if not self.is_fullscreen:
@@ -2138,7 +6320,7 @@ class App(tk.Tk):
         self.attributes("-fullscreen", False)
         self.is_fullscreen = False
         self.resizable(True, True)
-        self._center_window(*WINDOWED_SIZE)
+        self.state("zoomed")
         self.btn_fullscreen.configure(text="Toàn màn hình")
         self._update_status()
 
@@ -2172,6 +6354,10 @@ class App(tk.Tk):
         y = max((screen_h - height) // 2, 0)
         self.geometry(f"{width}x{height}+{x}+{y}")
 
+    def _flash_status(self, message):
+        self.status.configure(text=message)
+        self.after(2500, self._update_status)
+
     def _update_status(self):
         mode = "Toàn màn hình" if self.is_fullscreen else "Cửa sổ"
         size = f"{self.winfo_width()}x{self.winfo_height()}"
@@ -2181,7 +6367,9 @@ class App(tk.Tk):
         self.status.configure(
             text=f"Công cụ: {tool}    |    Lớp: {layer}"
                  f"    |    Tài liệu: {doc}    |    {mode} {size}"
-                 f"    |    F11 · Esc · Ctrl+J · Ctrl+Z · Ctrl+S · Ctrl+O"
+                 f"    |    Zoom: {round(self.zoom * 100)}%"
+                 f"    |    F1 · F11 · Esc · Ctrl+N/O/S/E/Q · Ctrl+Shift+S"
+                 f" · Ctrl+J/G/Z · Ctrl+; · Ctrl+lăn chuột (zoom)"
         )
 
 
