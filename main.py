@@ -4989,12 +4989,7 @@ class App(tk.Tk):
             return (0, 0, self.content_width, self.content_height)
         return bounds
 
-    def _new_document(self, _event=None):
-        self._commit_text_editor()
-        if not self._confirm_save_changes():
-            return
-        self._hide_help_tab()
-        self._new_doc_counter += 1
+    def _reset_document_state(self):
         self.layers = []
         self.layer_counter = 0
         self.active_layer = None
@@ -5018,6 +5013,14 @@ class App(tk.Tk):
         self.body_font_family = "none"
         self.body_font_family_var.set("none")
         self.doc_path = None
+
+    def _new_document(self, _event=None):
+        self._commit_text_editor()
+        if not self._confirm_save_changes():
+            return
+        self._hide_help_tab()
+        self._new_doc_counter += 1
+        self._reset_document_state()
         self.doc_name = f"Chưa có tên-{self._new_doc_counter}"
         self._set_content_size(*CONTENT_SIZE)
         self._add_layer(record=False)
@@ -5033,10 +5036,22 @@ class App(tk.Tk):
         path = filedialog.askopenfilename(
             parent=self,
             title="Mở tài liệu",
-            filetypes=[("DBW Document", "*.dbw"), ("Tất cả tệp", "*.*")],
+            filetypes=[
+                (
+                    "Tài liệu & hình ảnh",
+                    "*.dbw *.png *.jpg *.jpeg *.webp *.gif *.bmp",
+                ),
+                ("DBW Document", "*.dbw"),
+                ("Hình ảnh", "*.png *.jpg *.jpeg *.webp *.gif *.bmp"),
+                ("Tất cả tệp", "*.*"),
+            ],
         )
         if not path:
             return
+
+        extension = os.path.splitext(path)[1].lower()
+        if extension in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+            return self._open_image_document(path)
 
         try:
             with open(path, encoding="utf-8") as handle:
@@ -5121,6 +5136,47 @@ class App(tk.Tk):
         self._render_document()
         self._refresh_doc_tab()
 
+    def _open_image_document(self, path):
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+            data, mime, width, height = self._prepare_image(raw, path)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Lỗi mở tệp", str(error), parent=self)
+            return
+
+        page_width = max(100, min(width, 6000))
+        page_height = max(100, min(height, 6000))
+        record_width, record_height = width, height
+        if width > page_width or height > page_height:
+            scale = min(page_width / width, page_height / height)
+            record_width = max(int(round(width * scale)), 1)
+            record_height = max(int(round(height * scale)), 1)
+
+        self._hide_help_tab()
+        self._new_doc_counter += 1
+        self._reset_document_state()
+        self.doc_name = os.path.splitext(os.path.basename(path))[0]
+        self._set_content_size(page_width, page_height)
+        record = {
+            "type": "image",
+            "x": (page_width - record_width) // 2,
+            "y": (page_height - record_height) // 2,
+            "width": record_width,
+            "height": record_height,
+            "data": data,
+            "mime": mime,
+            "border_color": BRUSH_COLOR,
+            "border_width": 0,
+        }
+        self._create_layer(self._next_layer_name("Hình ảnh"))
+        self.active_layer.items.append(record)
+        self._refresh_layers()
+        self.saved_signature = self._document_signature()
+        self._render_document()
+        self._layout_content_viewport()
+        self._refresh_doc_tab()
+
     def _save_document(self, _event=None):
         self._commit_text_editor()
         path = self.doc_path
@@ -5150,6 +5206,7 @@ class App(tk.Tk):
             initialfile=initial,
             filetypes=[
                 ("DBW Document", "*.dbw"),
+                ("Hình ảnh WebP", "*.webp"),
                 ("Hình ảnh JPG", "*.jpg *.jpeg"),
                 ("Tất cả tệp", "*.*"),
             ],
@@ -5157,15 +5214,17 @@ class App(tk.Tk):
         if not path:
             return False
         extension = os.path.splitext(path)[1].lower()
-        if extension in (".jpg", ".jpeg"):
+        if extension in (".jpg", ".jpeg", ".webp"):
             return self._save_page_image(path)
         return self._write_document_file(path)
 
     def _save_page_image(self, path):
+        extension = os.path.splitext(path)[1].lower()
+        image_format = "WEBP" if extension == ".webp" else "JPEG"
         if Image is None or ImageGrab is None:
             messagebox.showerror(
                 "Lỗi lưu ảnh",
-                "Cần cài Pillow để lưu trang thiết kế thành ảnh JPG.",
+                "Cần cài Pillow để lưu trang thiết kế thành ảnh JPG/WebP.",
                 parent=self,
             )
             return False
@@ -5181,7 +5240,7 @@ class App(tk.Tk):
             return False
         try:
             image = self._render_page_image()
-            image.convert("RGB").save(path, format="JPEG", quality=95)
+            image.convert("RGB").save(path, format=image_format, quality=95)
         except Exception as error:
             messagebox.showerror("Lỗi lưu ảnh", str(error), parent=self)
             return False
