@@ -1,6 +1,7 @@
 import base64
 import html
 import json
+import math
 import os
 import tkinter as tk
 from collections import Counter
@@ -3711,6 +3712,11 @@ class App(tk.Tk):
             widget.bind(
                 "<Button-1>", lambda event, l=layer: self._on_layer_press(event, l)
             )
+        for widget in bg_widgets + [thumb]:
+            widget.bind(
+                "<Button-3>",
+                lambda event, l=layer: self._on_layer_context(event, l),
+            )
         name.bind(
             "<Double-Button-1>",
             lambda _e, l=layer, w=name: self._begin_rename(l, w),
@@ -3740,6 +3746,47 @@ class App(tk.Tk):
         self._drag_moved = False
         self._drag_blocked = False
         self._drag_in_panel = True
+
+    def _on_layer_context(self, event, layer):
+        if layer not in self.selected_layers:
+            self._select_layer(layer)
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg=PANEL_BG,
+            fg=TEXT,
+            activebackground=ACCENT,
+            activeforeground=TEXT,
+            selectcolor=ACCENT,
+            bd=0,
+        )
+        export_menu = tk.Menu(
+            menu,
+            tearoff=0,
+            bg=PANEL_BG,
+            fg=TEXT,
+            activebackground=ACCENT,
+            activeforeground=TEXT,
+            bd=0,
+        )
+        for kind, label in (
+            ("png", "PNG (.png)"),
+            ("jpg", "JPG (.jpg)"),
+            ("webp", "WebP (.webp)"),
+            ("svg", "SVG (.svg)"),
+        ):
+            export_menu.add_command(
+                label=label,
+                command=lambda value=kind, target=layer: self._export_layer(
+                    target, value
+                ),
+            )
+        menu.add_cascade(label="Xuất layer", menu=export_menu)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _begin_rename(self, layer, label):
         entry = self._rename_entry
@@ -6026,6 +6073,539 @@ class App(tk.Tk):
             for band in over_black.split()
         ]
         return Image.merge("RGBA", (*bands, alpha))
+
+    def _export_layer(self, layer, kind):
+        self._commit_text_editor()
+        if not layer.visible:
+            messagebox.showinfo(
+                "Xuất layer",
+                "Lớp đang bị ẩn. Hãy bật hiển thị lớp trước khi xuất.",
+                parent=self,
+            )
+            return
+        if kind != "svg" and (Image is None or ImageGrab is None):
+            messagebox.showerror(
+                "Lỗi xuất layer",
+                "Cần cài Pillow để xuất layer thành ảnh JPG/PNG/WebP.",
+                parent=self,
+            )
+            return
+        bounds = self._layer_export_bounds(layer)
+        if bounds is None:
+            messagebox.showinfo(
+                "Xuất layer", "Lớp này không có nội dung để xuất.", parent=self
+            )
+            return
+        labels = {"png": "PNG", "jpg": "JPG", "webp": "WebP", "svg": "SVG"}
+        label = labels[kind]
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title=f"Xuất layer '{layer.name}'",
+            defaultextension=f".{kind}",
+            initialfile=f"{self._layer_file_stem(layer)}.{kind}",
+            filetypes=[
+                (f"{label} (*.{kind})", f"*.{kind}"),
+                ("Tất cả tệp", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        if not self.winfo_viewable():
+            messagebox.showerror(
+                "Lỗi xuất layer",
+                "Cần mở cửa sổ ứng dụng để xuất layer.",
+                parent=self,
+            )
+            return
+        self._hide_help_tab()
+        self.update_idletasks()
+        try:
+            if kind == "svg":
+                self._save_layer_svg(layer, path, bounds)
+            else:
+                self._save_layer_image(layer, path, kind, bounds)
+        except Exception as error:
+            messagebox.showerror("Lỗi xuất layer", str(error), parent=self)
+            return
+        self._flash_status(f"Đã xuất layer {os.path.basename(path)}")
+
+    @staticmethod
+    def _layer_file_stem(layer):
+        raw = str(layer.name or "")
+        cleaned = "".join(
+            char for char in raw
+            if char not in '<>:"/\\|?*' and ord(char) >= 32
+        ).strip().strip(".")
+        return cleaned or "layer"
+
+    def _save_layer_image(self, layer, path, kind, bounds):
+        if kind == "jpg":
+            image = self._render_layer_image(layer, bounds).convert("RGB")
+            image.save(path, format="JPEG", quality=95)
+            return
+        image = self._transparent_layer_image(layer, bounds)
+        if kind == "png":
+            image.save(path, format="PNG")
+        else:
+            image.save(path, format="WEBP", quality=95)
+
+    def _layer_export_bounds(self, layer):
+        bounds = self._layer_visual_bounds(layer)
+        if bounds is None:
+            return None
+        x1, y1, x2, y2 = bounds
+        pad = 2
+        left = math.floor(x1) - pad
+        top = math.floor(y1) - pad
+        right = max(math.ceil(x2) + pad, left + 1)
+        bottom = max(math.ceil(y2) + pad, top + 1)
+        return (float(left), float(top), float(right), float(bottom))
+
+    def _layer_visual_bounds(self, layer):
+        xs = []
+        ys = []
+
+        def add_record(record, dx, dy, stretch_width):
+            kind = record.get("type")
+            if kind in ("rect", "ellipse"):
+                x2 = (
+                    record["x1"] + stretch_width
+                    if stretch_width is not None
+                    else record["x2"]
+                )
+                edge = max(1, record.get("border_width", 2)) / 2
+                xs.extend(
+                    (record["x1"] - edge + dx, x2 + edge + dx)
+                )
+                ys.extend(
+                    (record["y1"] - edge + dy, record["y2"] + edge + dy)
+                )
+            elif kind == "line":
+                edge = max(1, record.get("width", 1)) / 2
+                coords = record.get("coords") or []
+                for index in range(0, len(coords) - 1, 2):
+                    xs.extend(
+                        (
+                            coords[index] - edge + dx,
+                            coords[index] + edge + dx,
+                        )
+                    )
+                    ys.extend(
+                        (
+                            coords[index + 1] - edge + dy,
+                            coords[index + 1] + edge + dy,
+                        )
+                    )
+            elif kind == "dot":
+                radius = record.get("r", 0)
+                xs.extend(
+                    (record["x"] - radius + dx, record["x"] + radius + dx)
+                )
+                ys.extend(
+                    (record["y"] - radius + dy, record["y"] + radius + dy)
+                )
+            elif kind == "text":
+                _font, _lines, widths, _advance, _spacing, height = (
+                    self._text_metrics(record)
+                )
+                block_width = max(widths, default=0)
+                start = self._text_block_start(record, block_width)
+                xs.extend((start + dx, start + block_width + dx))
+                ys.extend((record["y"] + dy, record["y"] + height + dy))
+            elif kind == "image":
+                width = (
+                    stretch_width
+                    if stretch_width is not None
+                    else record.get("width", 0)
+                )
+                edge = record.get("border_width", 0) / 2
+                xs.extend(
+                    (
+                        record["x"] - edge + dx,
+                        record["x"] + dx + width + edge,
+                    )
+                )
+                ys.extend(
+                    (
+                        record["y"] - edge + dy,
+                        record["y"] + dy
+                        + record.get("height", 0) + edge,
+                    )
+                )
+
+        def collect(
+            layers, dx=0.0, dy=0.0, stretch_width=None,
+            children_dx=None, children_dy=None,
+        ):
+            base_dx = dx if children_dx is None else children_dx
+            base_dy = dy if children_dy is None else children_dy
+            for item_layer in layers:
+                if not item_layer.visible:
+                    continue
+                image = item_layer.background_image
+                if image and image.get("data"):
+                    bx1, by1, bx2, by2 = self._layer_background_bounds(
+                        item_layer
+                    )
+                    if stretch_width is not None:
+                        bx2 = bx1 + stretch_width
+                    xs.extend((bx1 + dx, bx2 + dx))
+                    ys.extend((by1 + dy, by2 + dy))
+                for record in item_layer.items:
+                    add_record(record, dx, dy, stretch_width)
+                offsets = {}
+                display = self._layer_display(item_layer)
+                if item_layer.children and display == "flex":
+                    offsets = self._flex_child_offsets(item_layer)
+                elif item_layer.children and display == "grid":
+                    offsets = self._grid_child_offsets(item_layer)
+                for child in item_layer.children:
+                    if not child.visible:
+                        continue
+                    child_dx, child_dy, child_stretch = offsets.get(
+                        id(child), (0.0, 0.0, None)
+                    )
+                    keep_design = (
+                        display == "flex"
+                        and child.children
+                        and self._is_flex_fill_layer(child)
+                    )
+                    collect(
+                        [child],
+                        base_dx + child_dx,
+                        base_dy + child_dy,
+                        child_stretch,
+                        children_dx=base_dx if keep_design else None,
+                        children_dy=base_dy if keep_design else None,
+                    )
+
+        collect([layer])
+        if not xs or not ys:
+            return None
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _render_layer_image(self, layer, bounds, background=DOC_BG):
+        x1, y1, x2, y2 = bounds
+        page_w = max(int(round(x2 - x1)), 1)
+        page_h = max(int(round(y2 - y1)), 1)
+        screen_w = max(int(self.winfo_screenwidth()), 1)
+        screen_h = max(int(self.winfo_screenheight()), 1)
+        view_w = min(page_w, 1200, max(screen_w - 120, 240))
+        view_h = min(page_h, 900, max(screen_h - 180, 180))
+        snapshot = tk.Toplevel(self)
+        snapshot.overrideredirect(True)
+        snapshot.geometry(f"{view_w}x{view_h}+20+20")
+        try:
+            snapshot.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        canvas = tk.Canvas(
+            snapshot,
+            width=view_w,
+            height=view_h,
+            bg=background,
+            highlightthickness=0,
+            bd=0,
+        )
+        canvas.pack(fill="both", expand=True)
+        canvas.configure(scrollregion=(0, 0, page_w, page_h))
+        previous_canvas = self.doc_canvas
+        previous_zoom = self.zoom
+        self.doc_canvas = canvas
+        self.zoom = 1.0
+        try:
+            self._draw_layers([layer], -x1, -y1)
+            snapshot.update_idletasks()
+            snapshot.update()
+            image = Image.new("RGB", (page_w, page_h), background)
+            hwnd = snapshot.winfo_id()
+            for offset_y in self._snapshot_offsets(page_h, view_h):
+                for offset_x in self._snapshot_offsets(page_w, view_w):
+                    canvas.xview_moveto(offset_x / page_w)
+                    canvas.yview_moveto(offset_y / page_h)
+                    snapshot.update_idletasks()
+                    snapshot.update()
+                    origin_x = max(int(round(canvas.canvasx(0))), 0)
+                    origin_y = max(int(round(canvas.canvasy(0))), 0)
+                    width = min(view_w, page_w - origin_x)
+                    height = min(view_h, page_h - origin_y)
+                    if width <= 0 or height <= 0:
+                        continue
+                    shot = ImageGrab.grab(window=hwnd)
+                    image.paste(
+                        shot.crop((0, 0, width, height)),
+                        (origin_x, origin_y),
+                    )
+            return image
+        finally:
+            self.doc_canvas = previous_canvas
+            self.zoom = previous_zoom
+            snapshot.destroy()
+            self._render_document()
+            self._layout_content_viewport()
+
+    def _transparent_layer_image(self, layer, bounds):
+        over_white = self._render_layer_image(
+            layer, bounds, DOC_BG
+        ).convert("RGB")
+        over_black = self._render_layer_image(
+            layer, bounds, "#000000"
+        ).convert("RGB")
+        alpha = ImageChops.invert(
+            ImageChops.subtract(over_white, over_black)
+        ).convert("L")
+        safe_alpha = ImageChops.add(
+            alpha, alpha.point(lambda value: 255 if value == 0 else 0)
+        )
+        evaluate = getattr(ImageMath, "unsafe_eval", None) or ImageMath.eval
+        bands = [
+            evaluate("convert(b * 255 / a, 'L')", b=band, a=safe_alpha)
+            for band in over_black.split()
+        ]
+        return Image.merge("RGBA", (*bands, alpha))
+
+    def _save_layer_svg(self, layer, path, bounds):
+        x1, y1, x2, y2 = bounds
+        width = max(int(round(x2 - x1)), 1)
+        height = max(int(round(y2 - y1)), 1)
+        parts = [
+            '<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{width}" height="{height}" '
+            f'viewBox="{self._css_num(x1)} {self._css_num(y1)} '
+            f'{width} {height}">'
+        ]
+        self._svg_layers([layer], 0.0, 0.0, parts)
+        parts.append("</svg>")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(parts))
+
+    def _svg_layers(
+        self, layers, dx, dy, parts, stretch_width=None,
+        children_dx=None, children_dy=None,
+    ):
+        base_dx = dx if children_dx is None else children_dx
+        base_dy = dy if children_dy is None else children_dy
+        for layer in layers:
+            if not layer.visible:
+                continue
+            self._svg_layer_background(
+                layer, dx, dy, stretch_width, parts
+            )
+            for record in layer.items:
+                markup = self._svg_record(record, dx, dy, stretch_width)
+                if markup:
+                    parts.append(markup)
+            offsets = {}
+            display = self._layer_display(layer)
+            if layer.children and display == "flex":
+                offsets = self._flex_child_offsets(layer)
+            elif layer.children and display == "grid":
+                offsets = self._grid_child_offsets(layer)
+            for child in layer.children:
+                if not child.visible:
+                    continue
+                child_dx, child_dy, child_stretch = offsets.get(
+                    id(child), (0.0, 0.0, None)
+                )
+                keep_design = (
+                    display == "flex"
+                    and child.children
+                    and self._is_flex_fill_layer(child)
+                )
+                self._svg_layers(
+                    [child],
+                    base_dx + child_dx,
+                    base_dy + child_dy,
+                    parts,
+                    child_stretch,
+                    children_dx=base_dx if keep_design else None,
+                    children_dy=base_dy if keep_design else None,
+                )
+
+    def _svg_layer_background(
+        self, layer, dx, dy, stretch_width, parts
+    ):
+        image = layer.background_image
+        if not image or not image.get("data"):
+            return
+        x1, y1, x2, y2 = self._layer_background_bounds(layer)
+        if stretch_width is not None:
+            x2 = x1 + stretch_width
+        width = max(x2 - x1, 1)
+        height = max(y2 - y1, 1)
+        fit = (
+            "xMidYMid slice"
+            if self._background_setting(image, "size") == "cover"
+            else "xMidYMid meet"
+        )
+        href = (
+            f"data:{image.get('mime') or 'image/png'};base64,"
+            f"{image['data']}"
+        )
+        parts.append(
+            f'  <image x="{self._css_num(x1 + dx)}" '
+            f'y="{self._css_num(y1 + dy)}" '
+            f'width="{self._css_num(width)}" '
+            f'height="{self._css_num(height)}" '
+            f'href="{href}" preserveAspectRatio="{fit}"/>'
+        )
+
+    def _svg_record(self, record, dx=0.0, dy=0.0, stretch_width=None):
+        kind = record.get("type")
+        if kind in ("rect", "ellipse"):
+            x1 = float(record["x1"]) + dx
+            y1 = float(record["y1"]) + dy
+            x2 = (
+                float(record["x1"]) + stretch_width
+                if stretch_width is not None
+                else float(record["x2"])
+            ) + dx
+            y2 = float(record["y2"]) + dy
+            fill = html.escape(
+                str(record.get("background") or "none"), quote=True
+            )
+            stroke = html.escape(
+                str(
+                    record.get("border_color")
+                    or record.get("color")
+                    or BRUSH_COLOR
+                ),
+                quote=True,
+            )
+            stroke_width = max(1, round(record.get("border_width", 2)))
+            if kind == "rect":
+                return (
+                    f'  <rect x="{self._css_num(x1)}" '
+                    f'y="{self._css_num(y1)}" '
+                    f'width="{self._css_num(max(x2 - x1, 0))}" '
+                    f'height="{self._css_num(max(y2 - y1, 0))}" '
+                    f'fill="{fill}" stroke="{stroke}" '
+                    f'stroke-width="{stroke_width}"/>'
+                )
+            return (
+                f'  <ellipse cx="{self._css_num((x1 + x2) / 2)}" '
+                f'cy="{self._css_num((y1 + y2) / 2)}" '
+                f'rx="{self._css_num(max((x2 - x1) / 2, 0))}" '
+                f'ry="{self._css_num(max((y2 - y1) / 2, 0))}" '
+                f'fill="{fill}" stroke="{stroke}" '
+                f'stroke-width="{stroke_width}"/>'
+            )
+        if kind == "line":
+            coords = list(record.get("coords") or [])
+            points = []
+            for index in range(0, len(coords) - 1, 2):
+                points.append(
+                    f"{self._css_num(coords[index] + dx)},"
+                    f"{self._css_num(coords[index + 1] + dy)}"
+                )
+            if len(points) < 2:
+                return ""
+            color = html.escape(
+                str(record.get("color") or BRUSH_COLOR), quote=True
+            )
+            width = max(1, round(record.get("width", 1)))
+            return (
+                f'  <polyline points="{" ".join(points)}" fill="none" '
+                f'stroke="{color}" stroke-width="{width}" '
+                f'stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+        if kind == "dot":
+            radius = max(float(record.get("r", 0)), 0)
+            color = html.escape(
+                str(record.get("color") or BRUSH_COLOR), quote=True
+            )
+            return (
+                f'  <circle cx="{self._css_num(record["x"] + dx)}" '
+                f'cy="{self._css_num(record["y"] + dy)}" '
+                f'r="{self._css_num(radius)}" fill="{color}"/>'
+            )
+        if kind == "text":
+            return self._svg_text(record, dx, dy)
+        if kind == "image":
+            return self._svg_image(record, dx, dy, stretch_width)
+        return ""
+
+    def _svg_text(self, record, dx=0.0, dy=0.0):
+        font, lines, widths, advance, letter_spacing, _height = (
+            self._text_metrics(record)
+        )
+        family = self._text_family(record)
+        if family == "none":
+            family = (
+                self.body_font_family
+                if self.body_font_family != "none"
+                else "Segoe UI"
+            )
+        color = html.escape(
+            str(record.get("color") or TEXT), quote=True
+        )
+        size = max(int(record.get("font_size", 14)), 1)
+        weight = self._text_weight_value(record)
+        align = self._text_align(record)
+        block_width = max(widths, default=0)
+        start = self._text_block_start(record, block_width)
+        ascent = font.metrics("ascent")
+        attributes = (
+            f'font-family="{html.escape(str(family), quote=True)}" '
+            f'font-size="{size}" font-weight="{weight}"'
+        )
+        if letter_spacing:
+            attributes += (
+                f' letter-spacing="{self._css_num(letter_spacing)}"'
+            )
+        parts = []
+        for index, line in enumerate(lines):
+            if not line:
+                continue
+            line_x = start + dx
+            if align == "center":
+                line_x += (block_width - widths[index]) / 2
+            elif align == "right":
+                line_x += block_width - widths[index]
+            line_y = record["y"] + dy + index * advance + ascent
+            parts.append(
+                f'  <text x="{self._css_num(line_x)}" '
+                f'y="{self._css_num(line_y)}" fill="{color}" '
+                f'{attributes} xml:space="preserve">'
+                f'{html.escape(line)}</text>'
+            )
+        return "\n".join(parts)
+
+    def _svg_image(self, record, dx=0.0, dy=0.0, stretch_width=None):
+        data = record.get("data")
+        if not data:
+            return ""
+        width = (
+            float(stretch_width)
+            if stretch_width is not None
+            else float(record.get("width", 0))
+        )
+        height = float(record.get("height", 0))
+        if width <= 0 or height <= 0:
+            return ""
+        mime = record.get("mime") or "image/png"
+        parts = [
+            f'  <image x="{self._css_num(record["x"] + dx)}" '
+            f'y="{self._css_num(record["y"] + dy)}" '
+            f'width="{self._css_num(width)}" '
+            f'height="{self._css_num(height)}" '
+            f'href="data:{mime};base64,{data}" '
+            f'preserveAspectRatio="none"/>'
+        ]
+        border_width = record.get("border_width", 0)
+        if border_width > 0:
+            stroke = html.escape(
+                str(record.get("border_color") or BRUSH_COLOR), quote=True
+            )
+            parts.append(
+                f'  <rect x="{self._css_num(record["x"] + dx)}" '
+                f'y="{self._css_num(record["y"] + dy)}" '
+                f'width="{self._css_num(width)}" '
+                f'height="{self._css_num(height)}" fill="none" '
+                f'stroke="{stroke}" '
+                f'stroke-width="{max(1, round(border_width))}"/>'
+            )
+        return "\n".join(parts)
 
     def _write_document_file(self, path):
         data = {
