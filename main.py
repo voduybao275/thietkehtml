@@ -3,15 +3,18 @@ import html
 import json
 import os
 import tkinter as tk
+from collections import Counter
 from io import BytesIO
 from tkinter import font as tkfont
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
 try:
-    from PIL import Image, ImageGrab
+    from PIL import Image, ImageChops, ImageGrab, ImageMath
 except ImportError:
     Image = None
+    ImageChops = None
     ImageGrab = None
+    ImageMath = None
 
 try:
     from psd_tools import PSDImage
@@ -51,6 +54,8 @@ ACCENT = "#3b82f6"
 ICON = "#dbe3ee"
 BRUSH_COLOR = "#2563eb"
 DOC_BG = "#ffffff"
+PAGE_BACKGROUNDS = ("white", "none")
+TRANSPARENT_BG = "#cbd5e1"
 DROP_BG = "#1d4ed8"
 
 WINDOWED_SIZE = (1100, 700)
@@ -367,6 +372,7 @@ class App(tk.Tk):
         self.doc_path = None
         self.content_width, self.content_height = CONTENT_SIZE
         self.content_full = False
+        self.content_background = "white"
         self.body_font_family = "none"
         self.zoom = 1.0
         self._content_size_window = None
@@ -829,6 +835,10 @@ class App(tk.Tk):
             max(round(self.content_height * self.zoom), 1),
         )
 
+    def _page_background(self):
+        value = getattr(self, "content_background", "white")
+        return value if value in PAGE_BACKGROUNDS else "white"
+
     def _layout_content_viewport(self, _event=None):
         if not (
             self.view_canvas.winfo_exists()
@@ -1272,6 +1282,7 @@ class App(tk.Tk):
 
         entries = {}
         full_var = tk.BooleanVar(window, value=self.content_full)
+        background_var = tk.StringVar(window, value=self._page_background())
         for row, (key, title, value) in enumerate(
             (
                 ("width", "Chiều rộng", self.content_width),
@@ -1300,10 +1311,44 @@ class App(tk.Tk):
             entry.bind(
                 "<Return>",
                 lambda _e: self._apply_content_size(
-                    window, entries["width"], entries["height"], full_var
+                    window,
+                    entries["width"],
+                    entries["height"],
+                    full_var,
+                    background_var,
                 ),
             )
             entries[key] = entry
+
+        tk.Label(
+            form,
+            text="Nền trang",
+            font=("Segoe UI", 10),
+            fg=TEXT,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(row=2, column=0, sticky="w", pady=(12, 0))
+        background_row = tk.Frame(form, bg=PANEL_BG)
+        background_row.grid(
+            row=2, column=1, columnspan=2, sticky="e", pady=(12, 0)
+        )
+        for value, title in (("white", "Trắng"), ("none", "Không nền")):
+            tk.Radiobutton(
+                background_row,
+                text=title,
+                value=value,
+                variable=background_var,
+                font=("Segoe UI", 10),
+                fg=TEXT,
+                bg=PANEL_BG,
+                activebackground=PANEL_BG,
+                activeforeground=TEXT,
+                selectcolor="#0b1220",
+                highlightthickness=0,
+                bd=0,
+                anchor="w",
+                cursor="hand2",
+            ).pack(side="left", padx=(10, 0))
 
         tk.Checkbutton(
             form,
@@ -1319,7 +1364,7 @@ class App(tk.Tk):
             bd=0,
             anchor="w",
             cursor="hand2",
-        ).grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
         tk.Label(
             form,
             text="Body full — không đặt width/height khi xuất HTML.",
@@ -1328,7 +1373,7 @@ class App(tk.Tk):
             bg=PANEL_BG,
             anchor="w",
         ).grid(
-            row=2, column=1, columnspan=2, sticky="w", pady=(10, 0)
+            row=3, column=1, columnspan=2, sticky="w", pady=(10, 0)
         )
 
         actions = tk.Frame(body, bg=PANEL_BG)
@@ -1354,7 +1399,11 @@ class App(tk.Tk):
             actions,
             text="Áp dụng",
             command=lambda: self._apply_content_size(
-                window, entries["width"], entries["height"], full_var
+                window,
+                entries["width"],
+                entries["height"],
+                full_var,
+                background_var,
             ),
             font=self.font_menu,
             fg=BG,
@@ -1378,7 +1427,7 @@ class App(tk.Tk):
         entries["width"].select_range(0, "end")
 
     def _apply_content_size(
-        self, window, width_entry, height_entry, full_var
+        self, window, width_entry, height_entry, full_var, background_var
     ):
         try:
             width = int(width_entry.get().strip())
@@ -1402,7 +1451,12 @@ class App(tk.Tk):
             return
         self._close_content_size_dialog(window)
         self.content_full = bool(full_var.get())
+        background = background_var.get()
+        self.content_background = (
+            background if background in PAGE_BACKGROUNDS else "white"
+        )
         self._set_content_size(width, height)
+        self._render_document()
 
     def _close_content_size_dialog(self, window):
         if window is not None and window.winfo_exists():
@@ -3526,6 +3580,7 @@ class App(tk.Tk):
                     self.content_width,
                     self.content_height,
                     self.content_full,
+                    self._page_background(),
                 ],
                 "guides": self.guides,
                 "body_font": self.body_font_family,
@@ -4604,6 +4659,8 @@ class App(tk.Tk):
                 else "Segoe UI"
             )
         size = max(int(round(int(record.get("font_size", 14)) * zoom)), 1)
+        if record.get("font_px"):
+            size = -size
         key = (family, size, weight)
         font = self._font_cache.get(key)
         if font is None:
@@ -4818,9 +4875,20 @@ class App(tk.Tk):
         self._image_scaled.clear()
         self._text_areas.clear()
         self._record_offsets.clear()
+        self._draw_page_background()
         self._draw_layers(self.layers)
         self._draw_guides()
         self._draw_marquee_overlay()
+
+    def _draw_page_background(self):
+        if self._page_background() != "none":
+            return
+        width, height = self._page_pixel_size()
+        self.doc_canvas.create_rectangle(
+            -1, -1, width + 1, height + 1,
+            fill=TRANSPARENT_BG, outline="", stipple="gray50",
+            tags=("page-background",),
+        )
 
     def _draw_layers(
         self, layers, dx=0.0, dy=0.0, stretch_width=None,
@@ -5047,6 +5115,7 @@ class App(tk.Tk):
         self.guides_visible = True
         self.zoom = 1.0
         self.content_full = False
+        self.content_background = "white"
         self.body_font_family = "none"
         self.body_font_family_var.set("none")
         self.doc_path = None
@@ -5079,7 +5148,9 @@ class App(tk.Tk):
                     f"*.dbw {IMAGE_FILE_PATTERN}",
                 ),
                 ("DBW Document", "*.dbw"),
-                ("Hình ảnh", IMAGE_FILE_PATTERN),
+                ("Hình ảnh PNG", "*.png"),
+                ("Hình ảnh WebP", "*.webp"),
+                ("Hình ảnh khác", "*.jpg *.jpeg *.gif *.bmp *.psd"),
                 ("Tất cả tệp", "*.*"),
             ],
         )
@@ -5142,6 +5213,12 @@ class App(tk.Tk):
             content_width, content_height = CONTENT_SIZE
         content_full = data.get("content_full", False)
         self.content_full = content_full if isinstance(content_full, bool) else False
+        content_background = data.get("content_background", "white")
+        self.content_background = (
+            content_background
+            if content_background in PAGE_BACKGROUNDS
+            else "white"
+        )
         self._set_content_size(content_width, content_height)
         loaded_guides = []
         for guide in data.get("guides", []):
@@ -5228,6 +5305,256 @@ class App(tk.Tk):
         name = getattr(blend_mode, "name", "") or ""
         css = name.lower().replace("_", "-")
         return css if css in PSD_CSS_BLEND_MODES else "normal"
+
+    @staticmethod
+    def _psd_font_key(name):
+        return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+    def _psd_installed_fonts(self):
+        fonts = getattr(self, "_psd_font_map", None)
+        if fonts is None:
+            fonts = {}
+            try:
+                for name in tkfont.families(self):
+                    fonts.setdefault(self._psd_font_key(name), name)
+            except tk.TclError:
+                pass
+            self._psd_font_map = fonts
+        return fonts
+
+    @staticmethod
+    def _psd_font_base(postscript):
+        base = str(postscript or "").split("-", 1)[0]
+        for suffix in ("PSMT", "MT", "PS"):
+            if len(base) > len(suffix) and base.endswith(suffix):
+                return base[: -len(suffix)]
+        return base
+
+    @staticmethod
+    def _psd_font_trim_style(base):
+        style_words = (
+            "extrabold", "ultrabold", "semibold", "demibold",
+            "extralight", "ultralight", "regular", "italic", "oblique",
+            "bold", "black", "heavy", "medium", "light", "thin",
+        )
+        trimmed = base
+        changed = True
+        while changed:
+            changed = False
+            lowered = trimmed.lower()
+            for word in style_words:
+                if len(trimmed) > len(word) and lowered.endswith(word):
+                    trimmed = trimmed[: -len(word)]
+                    changed = True
+                    break
+        return trimmed
+
+    def _psd_font_family(self, style):
+        font = getattr(style, "font", None)
+        family = str(getattr(font, "family", "") or "").strip()
+        postscript = str(
+            getattr(style, "font_name", "")
+            or getattr(font, "postscript_name", "")
+            or ""
+        ).strip()
+        base = self._psd_font_base(postscript)
+        installed = self._psd_installed_fonts()
+        for candidate in (family, postscript, base, self._psd_font_trim_style(base)):
+            actual = installed.get(self._psd_font_key(candidate))
+            if actual:
+                return actual
+        return family or base or "none"
+
+    def _psd_font_weight(self, style):
+        if getattr(style, "faux_bold", False):
+            return 700
+        font = getattr(style, "font", None)
+        label = " ".join(
+            str(value or "")
+            for value in (
+                getattr(font, "style", ""),
+                getattr(font, "postscript_name", ""),
+                getattr(style, "font_name", ""),
+            )
+        ).lower()
+        if any(word in label for word in ("black", "heavy")):
+            return 900
+        if any(word in label for word in ("extrabold", "ultrabold")):
+            return 800
+        if any(word in label for word in ("semibold", "demibold")):
+            return 600
+        if "bold" in label:
+            return 700
+        if "medium" in label:
+            return 500
+        if any(word in label for word in ("extralight", "ultralight", "thin")):
+            return 200
+        if "light" in label:
+            return 300
+        return 400
+
+    @staticmethod
+    def _psd_argb_color(values):
+        try:
+            parts = [float(value) for value in values]
+        except (TypeError, ValueError):
+            return ""
+        if len(parts) >= 4:
+            red, green, blue = parts[1:4]
+        elif len(parts) == 3:
+            red, green, blue = parts
+        else:
+            return ""
+        factor = 255.0 if max(red, green, blue) <= 1.0 else 1.0
+        channels = [
+            max(0, min(255, int(round(value * factor))))
+            for value in (red, green, blue)
+        ]
+        return "#%02x%02x%02x" % tuple(channels)
+
+    def _psd_text_color(self, style):
+        color = ""
+        try:
+            if getattr(style, "fill_flag", True):
+                color = self._psd_argb_color(style.fill_color)
+            if not color:
+                color = self._psd_argb_color(style.stroke_color)
+        except Exception:
+            color = ""
+        return color or "#0f172a"
+
+    def _psd_text_frame(self, psd_layer, context):
+        try:
+            if psd_layer.text_type != 1:
+                return None
+        except Exception:
+            return None
+        try:
+            shapes = psd_layer.engine_dict.get("Rendered", {}).get("Shapes")
+            children = shapes.get("Children") if shapes is not None else None
+            cookie = children[0].get("Cookie") if children else None
+            photoshop = cookie.get("Photoshop") if cookie is not None else None
+            bounds = photoshop.get("BoxBounds") if photoshop is not None else None
+            x1, y1, x2, y2 = (float(value) for value in bounds)
+            xx, xy, yx, yy, tx, ty = (
+                float(value) for value in psd_layer.transform[:6]
+            )
+        except Exception:
+            return None
+        corners = [(x, y) for x in (x1, x2) for y in (y1, y2)]
+        xs = [xx * x + yx * y + tx for x, y in corners]
+        ys = [xy * x + yy * y + ty for x, y in corners]
+        x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            return None
+        scale = context["scale"]
+        offset_x = context["offset_x"]
+        offset_y = context["offset_y"]
+        return [
+            int(round(x1 * scale + offset_x)),
+            int(round(y1 * scale + offset_y)),
+            int(round(x2 * scale + offset_x)),
+            int(round(y2 * scale + offset_y)),
+        ]
+
+    def _psd_text_record(self, psd_layer, context):
+        if getattr(psd_layer, "kind", None) != "type":
+            return None
+        try:
+            text = str(psd_layer.text or "")
+        except Exception:
+            return None
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = text.replace("\x03", "\n").strip("\x00").rstrip()
+        if not text.strip():
+            return None
+
+        try:
+            typesetting = psd_layer.typesetting
+            run = next(iter(typesetting.runs), None)
+            style = run.style if run is not None else typesetting.default_style
+            paragraph = next(iter(typesetting.paragraphs), None)
+            paragraph_style = (
+                paragraph.style
+                if paragraph is not None
+                else typesetting.default_paragraph_style
+            )
+        except Exception:
+            return None
+
+        try:
+            engine_size = float(getattr(style, "font_size", 12.0) or 12.0)
+        except (TypeError, ValueError):
+            engine_size = 12.0
+        scale = context["scale"]
+        transform = getattr(psd_layer, "transform", None)
+        transform_scale = 1.0
+        try:
+            xx, xy, yx, yy = (float(value) for value in transform[:4])
+            determinant = abs(xx * yy - xy * yx)
+            if determinant > 0:
+                transform_scale = max(0.05, min(20.0, determinant ** 0.5))
+        except (TypeError, ValueError):
+            transform_scale = 1.0
+        pixel_size = engine_size * scale * transform_scale
+        font_size = max(1, min(300, int(round(pixel_size))))
+
+        line_height = 1.2
+        try:
+            if getattr(style, "auto_leading", True):
+                line_height = float(getattr(paragraph_style, "auto_leading", 1.2))
+            else:
+                leading = float(getattr(style, "leading", 0) or 0)
+                if leading > 0 and engine_size > 0:
+                    line_height = leading / engine_size
+            line_height = round(min(3.0, max(0.5, line_height)), 2)
+        except (TypeError, ValueError):
+            line_height = 1.2
+
+        try:
+            tracking = int(getattr(style, "tracking", 0) or 0)
+        except (TypeError, ValueError):
+            tracking = 0
+        letter_spacing = int(round(tracking / 1000.0 * font_size))
+        letter_spacing = max(-20, min(100, letter_spacing))
+
+        align = "left"
+        justification = getattr(paragraph_style, "justification", None)
+        justify_name = getattr(justification, "name", "")
+        if justify_name == "RIGHT":
+            align = "right"
+        elif justify_name == "CENTER":
+            align = "center"
+
+        uppercase = getattr(getattr(style, "font_caps", None), "name", "") == "ALL_CAPS"
+
+        frame = self._psd_text_frame(psd_layer, context)
+        if frame is not None:
+            x, y = frame[0], frame[1]
+        else:
+            left, top = getattr(psd_layer, "offset", (0, 0))
+            x = int(round(left * scale + context["offset_x"]))
+            y = int(round(top * scale + context["offset_y"]))
+
+        record = {
+            "type": "text",
+            "x": x,
+            "y": y,
+            "text": text,
+            "color": self._psd_text_color(style),
+            "font_family": self._psd_font_family(style),
+            "font_size": font_size,
+            "font_weight": self._psd_font_weight(style),
+            "line_height": line_height,
+            "letter_spacing": letter_spacing,
+            "text_transform": "uppercase" if uppercase else "none",
+            "text_align": align,
+            "text_tag": "p",
+            "font_px": True,
+        }
+        if frame is not None:
+            record["text_frame"] = frame
+        return record
 
     def _open_psd_document(self, path):
         try:
@@ -5321,9 +5648,19 @@ class App(tk.Tk):
                 layer.children.append(child_layer)
             return layer
 
+        text = self._psd_text_record(psd_layer, context)
+        if text is not None:
+            layer.items.append(text)
+            return layer
+
         image = self._psd_layer_image(psd_layer, ancestors)
         if image is not None:
             image = image.convert("RGBA")
+            if opacity_scale >= 0.999:
+                rect = self._psd_shape_rect(psd_layer, image, context)
+                if rect is not None:
+                    layer.items.append(rect)
+                    return layer
             if opacity_scale < 0.999:
                 alpha = image.getchannel("A").point(
                     lambda value: int(round(value * opacity_scale))
@@ -5360,6 +5697,139 @@ class App(tk.Tk):
             except Exception:
                 image = None
         return image
+
+    def _psd_shape_rect(self, psd_layer, image, context):
+        if image is None or image.mode != "RGBA":
+            return None
+        shape = None
+        for origin in getattr(psd_layer, "origination", None) or []:
+            if type(origin).__name__ == "Rectangle":
+                shape = origin
+                break
+        if shape is None:
+            return None
+        for check in ("has_mask", "has_effects", "has_clip_layers"):
+            probe = getattr(psd_layer, check, None)
+            if not callable(probe):
+                continue
+            try:
+                if probe():
+                    return None
+            except Exception:
+                return None
+        if getattr(psd_layer, "clipping", False):
+            return None
+        try:
+            if int(getattr(psd_layer, "opacity", 255)) < 255:
+                return None
+            fill_opacity = getattr(psd_layer, "fill_opacity", 255)
+            if isinstance(fill_opacity, (int, float)) and fill_opacity < 255:
+                return None
+        except (TypeError, ValueError):
+            return None
+
+        bbox = getattr(shape, "bbox", None)
+        if bbox is None:
+            return None
+        try:
+            x1, y1, x2, y2 = (float(value) for value in bbox)
+        except (TypeError, ValueError):
+            return None
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            return None
+
+        scale = context["scale"]
+        offset_x = context["offset_x"]
+        offset_y = context["offset_y"]
+        left, top = getattr(psd_layer, "offset", (0, 0))
+        local = (x1 - left, y1 - top, x2 - left, y2 - top)
+
+        stroke = getattr(psd_layer, "stroke", None)
+        stroke_on = bool(stroke is not None and getattr(stroke, "enabled", False))
+        border_width = 0
+        border_color = ""
+        if stroke_on:
+            try:
+                line_width = float(getattr(stroke, "line_width", 0) or 0)
+            except (TypeError, ValueError):
+                line_width = 0
+            if line_width > 0:
+                border_color = self._psd_stroke_color(stroke)
+                if not border_color:
+                    return None
+                border_width = max(int(round(line_width * scale)), 1)
+
+        background = ""
+        fill_on = stroke is None or bool(getattr(stroke, "fill_enabled", True))
+        if fill_on:
+            inset = border_width + 2
+            background = self._psd_sample_color(
+                image,
+                (
+                    local[0] + inset,
+                    local[1] + inset,
+                    local[2] - inset,
+                    local[3] - inset,
+                ),
+            )
+            if not background:
+                return None
+        if not background and not (border_color and border_width > 0):
+            return None
+        if border_width <= 0:
+            border_color = background
+
+        return {
+            "type": "rect",
+            "x1": int(round(x1 * scale + offset_x)),
+            "y1": int(round(y1 * scale + offset_y)),
+            "x2": int(round(x2 * scale + offset_x)),
+            "y2": int(round(y2 * scale + offset_y)),
+            "color": border_color or background or BRUSH_COLOR,
+            "border_color": border_color or background or BRUSH_COLOR,
+            "border_width": border_width,
+            "background": background,
+        }
+
+    def _psd_stroke_color(self, stroke):
+        content = getattr(stroke, "content", None)
+        if content is None:
+            return ""
+        color = content.get(b"Clr ")
+        if color is None or not hasattr(color, "get"):
+            return ""
+        try:
+            values = [
+                max(0, min(255, int(round(float(color.get(key))))))
+                for key in (b"Rd  ", b"Grn ", b"Bl  ")
+            ]
+        except (KeyError, TypeError, ValueError):
+            return ""
+        return "#%02x%02x%02x" % tuple(values)
+
+    def _psd_sample_color(self, image, box):
+        left, top, right, bottom = (int(round(value)) for value in box)
+        width, height = image.size
+        left = max(left, 0)
+        top = max(top, 0)
+        right = min(right, width - 1)
+        bottom = min(bottom, height - 1)
+        if right < left or bottom < top:
+            return ""
+        step_x = max((right - left + 1) // 32, 1)
+        step_y = max((bottom - top + 1) // 32, 1)
+        pixels = []
+        for y in range(top, bottom + 1, step_y):
+            for x in range(left, right + 1, step_x):
+                red, green, blue, alpha = image.getpixel((x, y))
+                if alpha >= 200:
+                    pixels.append((red, green, blue))
+        if not pixels:
+            return ""
+        color, count = Counter(pixels).most_common(1)[0]
+        if count < len(pixels) * 0.9:
+            return ""
+        return "#%02x%02x%02x" % color
 
     def _psd_image_record(self, image, x, y, scale):
         if image is None or image.width < 1 or image.height < 1:
@@ -5414,6 +5884,7 @@ class App(tk.Tk):
             initialfile=initial,
             filetypes=[
                 ("DBW Document", "*.dbw"),
+                ("Hình ảnh PNG", "*.png"),
                 ("Hình ảnh WebP", "*.webp"),
                 ("Hình ảnh JPG", "*.jpg *.jpeg"),
                 ("Tất cả tệp", "*.*"),
@@ -5422,17 +5893,20 @@ class App(tk.Tk):
         if not path:
             return False
         extension = os.path.splitext(path)[1].lower()
-        if extension in (".jpg", ".jpeg", ".webp"):
+        if extension in (".png", ".jpg", ".jpeg", ".webp"):
             return self._save_page_image(path)
         return self._write_document_file(path)
 
     def _save_page_image(self, path):
         extension = os.path.splitext(path)[1].lower()
-        image_format = "WEBP" if extension == ".webp" else "JPEG"
+        image_format = {
+            ".png": "PNG",
+            ".webp": "WEBP",
+        }.get(extension, "JPEG")
         if Image is None or ImageGrab is None:
             messagebox.showerror(
                 "Lỗi lưu ảnh",
-                "Cần cài Pillow để lưu trang thiết kế thành ảnh JPG/WebP.",
+                "Cần cài Pillow để lưu trang thiết kế thành ảnh JPG/WebP/PNG.",
                 parent=self,
             )
             return False
@@ -5447,8 +5921,17 @@ class App(tk.Tk):
             )
             return False
         try:
-            image = self._render_page_image()
-            image.convert("RGB").save(path, format=image_format, quality=95)
+            if image_format == "PNG" and self._page_background() == "none":
+                image = self._transparent_page_image()
+                image.save(path, format="PNG")
+            else:
+                image = self._render_page_image()
+                if image_format == "PNG":
+                    image.convert("RGB").save(path, format="PNG")
+                else:
+                    image.convert("RGB").save(
+                        path, format=image_format, quality=95
+                    )
         except Exception as error:
             messagebox.showerror("Lỗi lưu ảnh", str(error), parent=self)
             return False
@@ -5468,7 +5951,7 @@ class App(tk.Tk):
             offsets[-1] = total - view
         return offsets
 
-    def _render_page_image(self):
+    def _render_page_image(self, background=DOC_BG):
         """Render the whole page at 1:1 by capturing tiles of a scratch window."""
         page_w = max(int(round(self.content_width)), 1)
         page_h = max(int(round(self.content_height)), 1)
@@ -5487,7 +5970,7 @@ class App(tk.Tk):
             snapshot,
             width=view_w,
             height=view_h,
-            bg=DOC_BG,
+            bg=background,
             highlightthickness=0,
             bd=0,
         )
@@ -5501,7 +5984,7 @@ class App(tk.Tk):
             self._draw_layers(self.layers)
             snapshot.update_idletasks()
             snapshot.update()
-            image = Image.new("RGB", (page_w, page_h), DOC_BG)
+            image = Image.new("RGB", (page_w, page_h), background)
             hwnd = snapshot.winfo_id()
             for offset_y in self._snapshot_offsets(page_h, view_h):
                 for offset_x in self._snapshot_offsets(page_w, view_w):
@@ -5528,6 +6011,22 @@ class App(tk.Tk):
             self._render_document()
             self._layout_content_viewport()
 
+    def _transparent_page_image(self):
+        over_white = self._render_page_image(DOC_BG).convert("RGB")
+        over_black = self._render_page_image("#000000").convert("RGB")
+        alpha = ImageChops.invert(
+            ImageChops.subtract(over_white, over_black)
+        ).convert("L")
+        safe_alpha = ImageChops.add(
+            alpha, alpha.point(lambda value: 255 if value == 0 else 0)
+        )
+        evaluate = getattr(ImageMath, "unsafe_eval", None) or ImageMath.eval
+        bands = [
+            evaluate("convert(b * 255 / a, 'L')", b=band, a=safe_alpha)
+            for band in over_black.split()
+        ]
+        return Image.merge("RGBA", (*bands, alpha))
+
     def _write_document_file(self, path):
         data = {
             "format": "dbw",
@@ -5535,6 +6034,7 @@ class App(tk.Tk):
             "content_width": self.content_width,
             "content_height": self.content_height,
             "content_full": self.content_full,
+            "content_background": self._page_background(),
             "body_font_family": self.body_font_family,
             "guides": [dict(guide) for guide in self.guides],
             "layers": [self._layer_state(layer) for layer in self.layers],
@@ -5796,6 +6296,8 @@ class App(tk.Tk):
             "body {",
             "  margin: 0;",
         ]
+        if self._page_background() == "white":
+            page_lines.append("  background: #ffffff;")
         if body_padding:
             page_lines.append(
                 f"  padding-top: {self._css_num(body_padding)}px;"
