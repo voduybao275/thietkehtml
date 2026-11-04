@@ -13,6 +13,31 @@ except ImportError:
     Image = None
     ImageGrab = None
 
+try:
+    from psd_tools import PSDImage
+except ImportError:
+    PSDImage = None
+
+PSD_CSS_BLEND_MODES = frozenset({
+    "normal",
+    "multiply",
+    "screen",
+    "overlay",
+    "darken",
+    "lighten",
+    "color-dodge",
+    "color-burn",
+    "hard-light",
+    "soft-light",
+    "difference",
+    "exclusion",
+    "hue",
+    "saturation",
+    "color",
+    "luminosity",
+    "plus-lighter",
+})
+
 BG = "#0f172a"
 PANEL_BG = "#1e293b"
 BORDER = "#334155"
@@ -31,6 +56,8 @@ DROP_BG = "#1d4ed8"
 WINDOWED_SIZE = (1100, 700)
 MIN_SIZE = (760, 460)
 CONTENT_SIZE = (960, 540)
+IMAGE_FILE_PATTERN = "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.psd"
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".psd")
 RULER_SIZE = 22
 RULER_BG = "#0b1220"
 RULER_TICK = "#475569"
@@ -246,6 +273,7 @@ class Layer:
         self.align = "left"
         self.justify = "left"
         self.gap = 0
+        self.blend_mode = "normal"
 
 
 class _DocEvent:
@@ -2144,7 +2172,7 @@ class App(tk.Tk):
             parent=self,
             title="Chọn ảnh nền",
             filetypes=[
-                ("Hình ảnh", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("Hình ảnh", IMAGE_FILE_PATTERN),
                 ("Tất cả tệp", "*.*"),
             ],
         )
@@ -3178,6 +3206,7 @@ class App(tk.Tk):
         clone.align = self._layer_align(layer)
         clone.justify = self._layer_justify(layer)
         clone.gap = self._layer_gap(layer)
+        clone.blend_mode = layer.blend_mode
         clone.background_image = (
             dict(layer.background_image) if layer.background_image else None
         )
@@ -3397,6 +3426,7 @@ class App(tk.Tk):
             "align": self._layer_align(layer),
             "justify": self._layer_justify(layer),
             "gap": self._layer_gap(layer),
+            "blend_mode": layer.blend_mode,
             "items": [dict(item) for item in layer.items],
             "background_image": (
                 dict(layer.background_image)
@@ -3427,6 +3457,12 @@ class App(tk.Tk):
                 and not isinstance(gap, bool)
                 and gap >= 0
                 else 0
+            )
+            blend_mode = item.get("blend_mode", "normal")
+            layer.blend_mode = (
+                blend_mode
+                if blend_mode in PSD_CSS_BLEND_MODES
+                else "normal"
             )
             layer.items = [dict(record) for record in item["items"]]
             background = item.get("background_image")
@@ -3477,6 +3513,7 @@ class App(tk.Tk):
             "align": self._layer_align(layer),
             "justify": self._layer_justify(layer),
             "gap": self._layer_gap(layer),
+            "blend_mode": layer.blend_mode,
             "items": layer.items,
             "background_image": layer.background_image,
             "children": [self._layer_signature(child) for child in layer.children],
@@ -4321,7 +4358,7 @@ class App(tk.Tk):
             parent=self,
             title="Chèn hình",
             filetypes=[
-                ("Hình ảnh", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("Hình ảnh", IMAGE_FILE_PATTERN),
                 ("Tất cả tệp", "*.*"),
             ],
         )
@@ -5039,10 +5076,10 @@ class App(tk.Tk):
             filetypes=[
                 (
                     "Tài liệu & hình ảnh",
-                    "*.dbw *.png *.jpg *.jpeg *.webp *.gif *.bmp",
+                    f"*.dbw {IMAGE_FILE_PATTERN}",
                 ),
                 ("DBW Document", "*.dbw"),
-                ("Hình ảnh", "*.png *.jpg *.jpeg *.webp *.gif *.bmp"),
+                ("Hình ảnh", IMAGE_FILE_PATTERN),
                 ("Tất cả tệp", "*.*"),
             ],
         )
@@ -5050,7 +5087,7 @@ class App(tk.Tk):
             return
 
         extension = os.path.splitext(path)[1].lower()
-        if extension in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+        if extension in IMAGE_EXTENSIONS:
             return self._open_image_document(path)
 
         try:
@@ -5137,6 +5174,15 @@ class App(tk.Tk):
         self._refresh_doc_tab()
 
     def _open_image_document(self, path):
+        if os.path.splitext(path)[1].lower() == ".psd":
+            if PSDImage is not None:
+                return self._open_psd_document(path)
+            messagebox.showwarning(
+                "PSD",
+                "Cần cài psd-tools để giữ layer PSD. "
+                "Tệp sẽ được mở dưới dạng ảnh gộp.",
+                parent=self,
+            )
         try:
             with open(path, "rb") as handle:
                 raw = handle.read()
@@ -5176,6 +5222,168 @@ class App(tk.Tk):
         self._render_document()
         self._layout_content_viewport()
         self._refresh_doc_tab()
+
+    @staticmethod
+    def _psd_blend_mode(blend_mode):
+        name = getattr(blend_mode, "name", "") or ""
+        css = name.lower().replace("_", "-")
+        return css if css in PSD_CSS_BLEND_MODES else "normal"
+
+    def _open_psd_document(self, path):
+        try:
+            psd = PSDImage.open(path)
+            psd_width = int(psd.width)
+            psd_height = int(psd.height)
+        except Exception as error:
+            messagebox.showerror("Lỗi mở tệp PSD", str(error), parent=self)
+            return
+        if psd_width < 1 or psd_height < 1:
+            messagebox.showerror(
+                "Lỗi mở tệp PSD",
+                "Tệp PSD không có kích thước hợp lệ.",
+                parent=self,
+            )
+            return
+
+        scale = min(1.0, 6000 / psd_width, 6000 / psd_height)
+        page_width = max(100, min(int(round(psd_width * scale)), 6000))
+        page_height = max(100, min(int(round(psd_height * scale)), 6000))
+        context = {
+            "scale": scale,
+            "offset_x": (page_width - psd_width * scale) / 2.0,
+            "offset_y": (page_height - psd_height * scale) / 2.0,
+        }
+
+        try:
+            layers = [
+                self._psd_layer_to_app(layer, [], 1.0, context)
+                for layer in psd
+            ]
+            if not layers:
+                flat = Layer(
+                    os.path.splitext(os.path.basename(path))[0]
+                    or "Hình ảnh"
+                )
+                record = self._psd_image_record(
+                    psd.composite(),
+                    context["offset_x"],
+                    context["offset_y"],
+                    scale,
+                )
+                if record is not None:
+                    flat.items.append(record)
+                layers = [flat]
+        except Exception as error:
+            messagebox.showerror("Lỗi mở tệp PSD", str(error), parent=self)
+            return
+
+        self._hide_help_tab()
+        self._new_doc_counter += 1
+        self._reset_document_state()
+        self.doc_name = os.path.splitext(os.path.basename(path))[0]
+        self.layers = layers
+        for layer in self.layers:
+            layer.parent = None
+        self.layer_counter = self._count_layers()
+        self.active_layer = self.layers[-1] if self.layers else None
+        self._set_content_size(page_width, page_height)
+        self._refresh_layers()
+        self.saved_signature = self._document_signature()
+        self._render_document()
+        self._layout_content_viewport()
+        self._refresh_doc_tab()
+
+    def _psd_layer_to_app(self, psd_layer, ancestors, opacity_scale, context):
+        name = str(getattr(psd_layer, "name", "") or "").strip() or "Lớp"
+        layer = Layer(name)
+        layer.visible = bool(getattr(psd_layer, "visible", True))
+        layer.blend_mode = self._psd_blend_mode(
+            getattr(psd_layer, "blend_mode", None)
+        )
+        opacity = getattr(psd_layer, "opacity", 255)
+        try:
+            opacity = max(0, min(255, int(opacity)))
+        except (TypeError, ValueError):
+            opacity = 255
+
+        is_group = getattr(psd_layer, "is_group", None)
+        if callable(is_group) and is_group():
+            layer.expanded = bool(getattr(psd_layer, "open_folder", True))
+            child_scale = opacity_scale * (opacity / 255.0)
+            for child in psd_layer:
+                child_layer = self._psd_layer_to_app(
+                    child,
+                    ancestors + [psd_layer],
+                    child_scale,
+                    context,
+                )
+                child_layer.parent = layer
+                layer.children.append(child_layer)
+            return layer
+
+        image = self._psd_layer_image(psd_layer, ancestors)
+        if image is not None:
+            image = image.convert("RGBA")
+            if opacity_scale < 0.999:
+                alpha = image.getchannel("A").point(
+                    lambda value: int(round(value * opacity_scale))
+                )
+                image.putalpha(alpha)
+            left, top = getattr(psd_layer, "offset", (0, 0))
+            scale = context["scale"]
+            record = self._psd_image_record(
+                image,
+                int(round(left * scale + context["offset_x"])),
+                int(round(top * scale + context["offset_y"])),
+                scale,
+            )
+            if record is not None:
+                layer.items.append(record)
+        return layer
+
+    def _psd_layer_image(self, psd_layer, ancestors):
+        hidden = [node for node in ancestors if not node.visible]
+        if not getattr(psd_layer, "visible", True):
+            hidden.append(psd_layer)
+        for node in hidden:
+            node.visible = True
+        try:
+            image = psd_layer.composite()
+        except Exception:
+            image = None
+        finally:
+            for node in hidden:
+                node.visible = False
+        if image is None:
+            try:
+                image = psd_layer.topil()
+            except Exception:
+                image = None
+        return image
+
+    def _psd_image_record(self, image, x, y, scale):
+        if image is None or image.width < 1 or image.height < 1:
+            return None
+        width = max(int(round(image.width * scale)), 1)
+        height = max(int(round(image.height * scale)), 1)
+        image = image.convert("RGBA")
+        if image.size != (width, height):
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            image = image.resize((width, height), resample)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        data = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return {
+            "type": "image",
+            "x": int(round(x)),
+            "y": int(round(y)),
+            "width": width,
+            "height": height,
+            "data": data,
+            "mime": "image/png",
+            "border_color": BRUSH_COLOR,
+            "border_width": 0,
+        }
 
     def _save_document(self, _event=None):
         self._commit_text_editor()
@@ -5935,6 +6143,7 @@ class App(tk.Tk):
                         skip_left=skip_left,
                         skip_bottom=skip_bottom,
                         fill=fill_child,
+                        blend_mode=layer.blend_mode,
                     )
                 self._collect_css_rules(layer.children, lines, flow)
                 continue
@@ -6001,6 +6210,10 @@ class App(tk.Tk):
                     lines.append(
                         "  text-align: "
                         f"{text_style['text_align']};"
+                    )
+                if layer.blend_mode != "normal":
+                    lines.append(
+                        f"  mix-blend-mode: {layer.blend_mode};"
                     )
                 lines.append("}")
             elif box is not None:
@@ -6069,6 +6282,10 @@ class App(tk.Tk):
                     self._append_group_gap(lines, layer)
                     self._append_group_justify(lines, layer)
                     self._append_group_align(lines, layer)
+                if layer.blend_mode != "normal":
+                    lines.append(
+                        f"  mix-blend-mode: {layer.blend_mode};"
+                    )
                 lines.append("}")
             elif layer.children:
                 display = self._layer_display(layer)
@@ -6135,7 +6352,7 @@ class App(tk.Tk):
 
     def _append_image_css(
         self, lines, class_name, record, left, gap,
-        skip_left=False, skip_bottom=False, fill=False,
+        skip_left=False, skip_bottom=False, fill=False, blend_mode="normal",
     ):
         if lines:
             lines.append("")
@@ -6163,6 +6380,8 @@ class App(tk.Tk):
                 f"  border: {self._css_num(border_width)}px solid "
                 f"{record.get('border_color') or BRUSH_COLOR};"
             )
+        if blend_mode != "normal":
+            lines.append(f"  mix-blend-mode: {blend_mode};")
         lines.append("}")
 
     def _layer_css_box(self, layer):

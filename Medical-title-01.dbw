@@ -146,7 +146,7 @@
       "display": "flex",
       "align": "center",
       "justify": "left",
-      "gap": 66,
+      "gap": 10,
       "items": [
         {
           "type": "rect",
@@ -268,8 +268,7 @@
     }
   ],
   "active_layer_path": [
-    2,
-    1
+    2
   ],
   "layer_counter": 48
 }
