@@ -242,7 +242,11 @@ CURSORS = {
 
 TEXT_TAGS = ("p", "h1", "h2", "h3", "h4", "h5", "h6")
 
-GROUP_DISPLAYS = ("block", "flex", "grid")
+TEXT_FORMATS = ("text", "span", "strong")
+
+GROUP_FORMATS = ("text", "h1", "h2", "h3", "h4", "h5", "h6")
+
+GROUP_DISPLAYS = ("block", "flex", "grid","inline")
 
 GROUP_ALIGNS = ("left", "center", "right")
 
@@ -280,6 +284,8 @@ class Layer:
         self.justify = "left"
         self.gap = 0
         self.blend_mode = "normal"
+        self.text_format = ""
+        self.group_tag = ""
 
 
 class _DocEvent:
@@ -385,6 +391,8 @@ class App(tk.Tk):
         self.saved_signature = ""
         self.dirty = False
         self._updating_info = False
+        self.info_collapsed = False
+        self.info_pinned = False
         self._drag_layer = None
         self._drag_origin = (0, 0)
         self._drag_moved = False
@@ -1498,8 +1506,29 @@ class App(tk.Tk):
 
         tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", padx=12)
 
-        self.layer_list = tk.Frame(inner, bg=PANEL_BG)
-        self.layer_list.pack(fill="both", expand=True, padx=6, pady=6)
+        self.layer_list_canvas = tk.Canvas(
+            inner,
+            bg=PANEL_BG,
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=20,
+        )
+        self.layer_list_canvas.pack(
+            fill="both", expand=True, padx=6, pady=6
+        )
+        self.layer_list = tk.Frame(self.layer_list_canvas, bg=PANEL_BG)
+        self._layer_list_window = self.layer_list_canvas.create_window(
+            (0, 0), window=self.layer_list, anchor="nw"
+        )
+        for widget in (
+            self.layer_list_canvas,
+            self.layer_list,
+        ):
+            widget.bind("<MouseWheel>", self._on_layer_mousewheel)
+            widget.bind(
+                "<Configure>", lambda _e: self._sync_layer_list_scroll()
+            )
+        self.after_idle(self._sync_layer_list_scroll)
 
         self.layer_count_label = tk.Label(
             inner,
@@ -1512,6 +1541,24 @@ class App(tk.Tk):
             pady=8,
         )
         self.layer_count_label.pack(fill="x", side="bottom")
+
+    def _sync_layer_list_scroll(self):
+        canvas = self.layer_list_canvas
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+        if width <= 1 or height <= 1:
+            return
+        content_height = max(self.layer_list.winfo_reqheight(), height)
+        canvas.itemconfigure(
+            self._layer_list_window, width=width, height=content_height
+        )
+        canvas.configure(scrollregion=(0, 0, width, content_height))
+
+    def _on_layer_mousewheel(self, event):
+        delta = int(event.delta / 120)
+        if delta:
+            self.layer_list_canvas.yview_scroll(-delta * 2, "units")
+        return "break"
 
     def _build_page_section(self, parent):
         header = tk.Frame(parent, bg=PANEL_BG)
@@ -1585,18 +1632,80 @@ class App(tk.Tk):
     def _build_info_section(self, parent):
         header = tk.Frame(parent, bg=PANEL_BG)
         header.pack(fill="x", padx=14, pady=(14, 8))
+        self.info_header = header
+        self.info_chevron = tk.Label(
+            header,
+            text="▾",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            padx=4,
+            cursor="hand2",
+        )
+        self.info_chevron.pack(side="left")
         self.info_title = tk.Label(
             header,
             text="THÔNG TIN HÌNH",
             font=self.font_panel,
             fg=MUTED,
             bg=PANEL_BG,
+            cursor="hand2",
         )
         self.info_title.pack(side="left")
-        tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=12)
+        self.info_pin = tk.Canvas(
+            header,
+            width=18,
+            height=18,
+            bg=PANEL_BG,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.info_pin.pack(side="right")
+        self._draw_info_pin()
+        for widget in (self.info_chevron, self.info_title):
+            widget.bind("<Button-1>", self._toggle_info_section)
+        self.info_pin.bind("<Button-1>", self._toggle_info_pin)
+        Tooltip(self.info_pin, "Ghim: luôn mở phần thông tin")
 
-        body = tk.Frame(parent, bg=PANEL_BG)
-        body.pack(fill="x", padx=14, pady=(8, 10))
+        self.info_content = tk.Frame(parent, bg=PANEL_BG)
+        self.info_content.pack(fill="x")
+        tk.Frame(self.info_content, bg=BORDER, height=1).pack(
+            fill="x", padx=12
+        )
+
+        position = tk.Frame(self.info_content, bg=PANEL_BG)
+        position.pack(fill="x", padx=14, pady=(8, 0))
+        position.grid_columnconfigure(1, weight=1)
+        self.info_position_label = self._info_label(position, 0, "Tọa độ")
+        position_holder = tk.Frame(position, bg=PANEL_BG)
+        position_holder.grid(row=0, column=1, sticky="e", pady=2)
+        self.info_position_rows = (self.info_position_label, position_holder)
+        tk.Label(
+            position_holder, text="X", font=("Segoe UI", 9), fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(side="left")
+        self.info_position_x = self._make_info_entry(position_holder, width=5)
+        self.info_position_x.pack(side="left", padx=(4, 8))
+        tk.Label(
+            position_holder, text="Y", font=("Segoe UI", 9), fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(side="left")
+        self.info_position_y = self._make_info_entry(position_holder, width=5)
+        self.info_position_y.pack(side="left", padx=(4, 0))
+        tk.Label(
+            position_holder, text="px", font=("Segoe UI", 9), fg=MUTED,
+            bg=PANEL_BG,
+        ).pack(side="left", padx=(4, 0))
+        for entry in (self.info_position_x, self.info_position_y):
+            entry.bind("<Return>", self._apply_layer_position)
+            entry.bind("<FocusOut>", self._apply_layer_position)
+        self.info_position_tip = Tooltip(
+            self.info_position_label,
+            "Nhập X/Y để di chuyển layer — mốc: canvas",
+        )
+
+        body = tk.Frame(self.info_content, bg=PANEL_BG)
+        body.pack(fill="x", padx=14, pady=(6, 10))
         body.grid_columnconfigure(1, weight=1)
 
         self.info_shape_rows = []
@@ -2052,9 +2161,9 @@ class App(tk.Tk):
             button.bind("<ButtonRelease-1>", lambda _event: "break")
             button.pack(side="left", padx=(0, 2))
 
-        label = self._info_label(body, 8, "Thẻ")
+        label = self._info_label(body, 9, "Thẻ")
         tag_holder = tk.Frame(body, bg=PANEL_BG)
-        tag_holder.grid(row=8, column=1, sticky="e", pady=2)
+        tag_holder.grid(row=9, column=1, sticky="e", pady=2)
         self.info_text_rows.extend((label, tag_holder))
         self.info_tag_var = tk.StringVar(value="p")
         self.info_tag_menu = self._make_info_menu(
@@ -2075,7 +2184,45 @@ class App(tk.Tk):
         for widget in self.info_text_rows:
             widget.grid_remove()
 
-        tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=12)
+        tk.Frame(self.info_content, bg=BORDER, height=1).pack(
+            fill="x", padx=12
+        )
+
+    def _draw_info_pin(self):
+        canvas = self.info_pin
+        canvas.delete("all")
+        color = ACCENT if self.info_pinned else MUTED
+        canvas.create_oval(
+            5, 1, 13, 9,
+            outline=color,
+            width=1.5,
+            fill=ACCENT if self.info_pinned else "",
+        )
+        canvas.create_polygon(7, 9, 11, 9, 9, 16, fill=color, outline="")
+
+    def _toggle_info_section(self, _event=None):
+        if self.info_pinned:
+            return "break"
+        self.info_collapsed = not self.info_collapsed
+        self._apply_info_collapsed()
+        return "break"
+
+    def _toggle_info_pin(self, _event=None):
+        self.info_pinned = not self.info_pinned
+        if self.info_pinned:
+            self.info_collapsed = False
+        self._apply_info_collapsed()
+        return "break"
+
+    def _apply_info_collapsed(self):
+        if self.info_collapsed:
+            self.info_content.pack_forget()
+        else:
+            self.info_content.pack(fill="x", after=self.info_header)
+        self.info_chevron.configure(
+            text="▸" if self.info_collapsed else "▾"
+        )
+        self._draw_info_pin()
 
     def _info_label(self, parent, row, title):
         label = tk.Label(
@@ -2271,7 +2418,9 @@ class App(tk.Tk):
 
     def _apply_layer_display(self, value):
         layer = self.active_layer
-        if layer is None or not layer.children:
+        if layer is None:
+            return
+        if not (layer.children or self._is_text_layer(layer)):
             return
         if value not in GROUP_DISPLAYS or self._layer_display(layer) == value:
             return
@@ -2373,6 +2522,7 @@ class App(tk.Tk):
         shape = rect if rect is not None else image
         self._updating_info = True
         try:
+            self._refresh_layer_position()
             self._show_info_rows(text is not None)
             bg_editable = text is None and self._can_have_layer_background(
                 self.active_layer
@@ -2393,7 +2543,13 @@ class App(tk.Tk):
                 self.active_layer is not None
                 and bool(self.active_layer.children)
             )
-            for widget in self.info_group_rows + self.info_group_align_rows:
+            show_display = group or text is not None
+            for widget in self.info_group_rows:
+                if show_display:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            for widget in self.info_group_align_rows:
                 if group:
                     widget.grid()
                 else:
@@ -2416,10 +2572,11 @@ class App(tk.Tk):
                     widget.grid()
                 else:
                     widget.grid_remove()
-            if group:
+            if show_display:
                 self.info_group_display_var.set(
                     self._layer_display(self.active_layer)
                 )
+            if group:
                 self.info_group_align_var.set(
                     self._layer_align(self.active_layer)
                 )
@@ -2465,22 +2622,30 @@ class App(tk.Tk):
                 width = round(abs(rect["x2"] - rect["x1"]))
                 height = round(abs(rect["y2"] - rect["y1"]))
                 border_width = rect.get("border_width", 2)
-                border_color = (
-                    rect.get("border_color") or rect.get("color") or BRUSH_COLOR
-                )
+                border_color = rect.get("border_color")
+                if border_color is None:
+                    border_color = rect.get("color") or BRUSH_COLOR
                 background = rect.get("background") or ""
             else:
                 width = round(image.get("width", 1))
                 height = round(image.get("height", 1))
                 border_width = image.get("border_width", 0)
-                border_color = image.get("border_color") or BRUSH_COLOR
+                border_color = image.get("border_color")
+                if border_color is None:
+                    border_color = BRUSH_COLOR
                 background = ""
 
             self._set_info_entry(self.info_width_entry, width)
             self._set_info_entry(self.info_height_entry, height)
-            self._set_info_entry(self.info_border_entry, border_width)
-            self._set_info_entry(self.info_border_color_entry, border_color)
-            self._paint_swatch(self.info_border_swatch, border_color)
+            self._set_info_entry(
+                self.info_border_entry, border_width if border_width else ""
+            )
+            self._set_info_entry(
+                self.info_border_color_entry, border_color or ""
+            )
+            self._paint_swatch(
+                self.info_border_swatch, border_color or None
+            )
             if rect is not None:
                 self._set_info_entry(self.info_bg_entry, background)
                 self._paint_swatch(self.info_bg_swatch, background or None)
@@ -2528,6 +2693,131 @@ class App(tk.Tk):
         align = self._text_align_state(text)
         self.info_align_var.set("" if align == "none" else align)
         self.info_tag_var.set(self._text_tag(text))
+
+    def _refresh_layer_position(self):
+        layer = self.active_layer
+        if layer is None:
+            for widget in self.info_position_rows:
+                widget.grid_remove()
+            return
+        for widget in self.info_position_rows:
+            widget.grid()
+        position = self._layer_position(layer)
+        values = (
+            ("—", "—")
+            if position is None
+            else (str(position[0]), str(position[1]))
+        )
+        for entry, value in zip(
+            (self.info_position_x, self.info_position_y), values
+        ):
+            entry.delete(0, "end")
+            entry.insert(0, value)
+        parent = layer.parent
+        target = "canvas" if parent is None else f"nhóm '{parent.name}'"
+        self.info_position_tip.text = (
+            f"Nhập X/Y để di chuyển layer — mốc: {target}"
+        )
+
+    def _apply_layer_position(self, _event=None):
+        if self._updating_info:
+            return
+        layer = self.active_layer
+        if layer is None:
+            return
+        current = self._layer_position(layer)
+        if current is None:
+            self._refresh_info()
+            return
+        try:
+            x = int(self.info_position_x.get())
+            y = int(self.info_position_y.get())
+        except ValueError:
+            self._refresh_info()
+            return
+        dx = x - current[0]
+        dy = y - current[1]
+        if dx == 0 and dy == 0:
+            return
+        self._push_history()
+        self._translate_layer(layer, dx, dy)
+        self._render_document()
+        self._refresh_info()
+        self._refresh_doc_tab()
+
+    def _layer_position(self, layer):
+        box = self._export_visual_box(layer)
+        if box is None and layer.children:
+            group_box = self._group_css_box(layer)
+            box = (
+                group_box["x"],
+                group_box["y"],
+                group_box["width"],
+                group_box["height"],
+            )
+        if box is None:
+            return None
+        offsets = self._layer_layout_offsets()
+        dx, dy = offsets.get(id(layer), (0.0, 0.0))
+        x = box[0] + dx
+        y = box[1] + dy
+        parent = layer.parent
+        if parent is not None:
+            parent_box = self._export_visual_box(parent)
+            if parent_box is None and parent.children:
+                group_box = self._group_css_box(parent)
+                parent_box = (
+                    group_box["x"],
+                    group_box["y"],
+                    group_box["width"],
+                    group_box["height"],
+                )
+            if parent_box is not None:
+                pdx, pdy = offsets.get(id(parent), (0.0, 0.0))
+                x -= parent_box[0] + pdx
+                y -= parent_box[1] + pdy
+        return int(round(x)), int(round(y))
+
+    def _layer_layout_offsets(self):
+        offsets = {}
+
+        def walk(
+            layers, dx=0.0, dy=0.0,
+            children_dx=None, children_dy=None,
+        ):
+            base_dx = dx if children_dx is None else children_dx
+            base_dy = dy if children_dy is None else children_dy
+            for item_layer in layers:
+                offsets[id(item_layer)] = (dx, dy)
+                if not item_layer.visible:
+                    continue
+                child_offsets = {}
+                display = self._layer_display(item_layer)
+                if item_layer.children and display == "flex":
+                    child_offsets = self._flex_child_offsets(item_layer)
+                elif item_layer.children and display == "grid":
+                    child_offsets = self._grid_child_offsets(item_layer)
+                for child in item_layer.children:
+                    if not child.visible:
+                        continue
+                    child_dx, child_dy, _stretch = child_offsets.get(
+                        id(child), (0.0, 0.0, None)
+                    )
+                    keep_design = (
+                        display == "flex"
+                        and child.children
+                        and self._is_flex_fill_layer(child)
+                    )
+                    walk(
+                        [child],
+                        base_dx + child_dx,
+                        base_dy + child_dy,
+                        children_dx=base_dx if keep_design else None,
+                        children_dy=base_dy if keep_design else None,
+                    )
+
+        walk(self.layers)
+        return offsets
 
     def _font_matches(self, text):
         query = text.strip().lower()
@@ -2781,17 +3071,20 @@ class App(tk.Tk):
             self.active_layer is None or self._active_text() is not None
         ):
             return
-        try:
-            border_width = max(0, min(50, int(self.info_border_entry.get())))
-        except ValueError:
-            self._refresh_info()
-            return
+        raw = self.info_border_entry.get().strip()
+        if not raw:
+            border_width = 0
+        else:
+            try:
+                border_width = max(0, min(50, int(raw)))
+            except ValueError:
+                self._refresh_info()
+                return
         if shape is not None:
             default = 2 if shape.get("type") in ("rect", "ellipse") else 0
             if border_width == shape.get("border_width", default):
                 self._refresh_info()
                 return
-            self._push_history()
         else:
             if border_width == 2:
                 self._refresh_info()
@@ -2823,7 +3116,14 @@ class App(tk.Tk):
             self.active_layer is None or self._active_text() is not None
         ):
             return
-        color = self._parse_hex_color(self.info_border_color_entry.get())
+        text = self.info_border_color_entry.get().strip()
+        if not text:
+            if shape is not None:
+                self._set_border_color(shape, "")
+            else:
+                self._refresh_info()
+            return
+        color = self._parse_hex_color(text)
         if color is None:
             self._refresh_info()
             return
@@ -2870,7 +3170,9 @@ class App(tk.Tk):
         self._set_background_color(rect, color)
 
     def _set_border_color(self, shape, color):
-        current = shape.get("border_color") or shape.get("color") or BRUSH_COLOR
+        current = shape.get("border_color")
+        if current is None:
+            current = shape.get("color") or BRUSH_COLOR
         if color != current:
             self._push_history()
             shape["border_color"] = color
@@ -3231,6 +3533,28 @@ class App(tk.Tk):
     def _is_text_layer(self, layer):
         return any(record.get("type") == "text" for record in layer.items)
 
+    def _set_text_format(self, layer, value):
+        if value not in TEXT_FORMATS:
+            return
+        new_value = "" if layer.text_format == value else value
+        if new_value == layer.text_format:
+            return
+        self._push_history()
+        layer.text_format = new_value
+        self._refresh_layers()
+        self._refresh_doc_tab()
+
+    def _set_group_format(self, layer, value):
+        if value not in GROUP_FORMATS:
+            return
+        new_value = "" if layer.group_tag == value else value
+        if new_value == layer.group_tag:
+            return
+        self._push_history()
+        layer.group_tag = new_value
+        self._refresh_layers()
+        self._refresh_doc_tab()
+
     def _is_image_layer(self, layer):
         return any(record.get("type") == "image" for record in layer.items)
 
@@ -3262,6 +3586,8 @@ class App(tk.Tk):
         clone.justify = self._layer_justify(layer)
         clone.gap = self._layer_gap(layer)
         clone.blend_mode = layer.blend_mode
+        clone.text_format = layer.text_format
+        clone.group_tag = layer.group_tag
         clone.background_image = (
             dict(layer.background_image) if layer.background_image else None
         )
@@ -3482,6 +3808,8 @@ class App(tk.Tk):
             "justify": self._layer_justify(layer),
             "gap": self._layer_gap(layer),
             "blend_mode": layer.blend_mode,
+            "text_format": layer.text_format,
+            "group_tag": layer.group_tag,
             "items": [dict(item) for item in layer.items],
             "background_image": (
                 dict(layer.background_image)
@@ -3518,6 +3846,14 @@ class App(tk.Tk):
                 blend_mode
                 if blend_mode in PSD_CSS_BLEND_MODES
                 else "normal"
+            )
+            text_format = item.get("text_format", "")
+            if text_format not in TEXT_FORMATS:
+                text_format = "span" if item.get("inline_text") else ""
+            layer.text_format = text_format
+            group_tag = item.get("group_tag", "")
+            layer.group_tag = (
+                group_tag if group_tag in GROUP_FORMATS else ""
             )
             layer.items = [dict(record) for record in item["items"]]
             background = item.get("background_image")
@@ -3569,6 +3905,8 @@ class App(tk.Tk):
             "justify": self._layer_justify(layer),
             "gap": self._layer_gap(layer),
             "blend_mode": layer.blend_mode,
+            "text_format": layer.text_format,
+            "group_tag": layer.group_tag,
             "items": layer.items,
             "background_image": layer.background_image,
             "children": [self._layer_signature(child) for child in layer.children],
@@ -3623,6 +3961,7 @@ class App(tk.Tk):
         self._drop_indicator = tk.Frame(self.layer_list, bg=ACCENT, height=2)
         self._build_layer_rows(self.layers, 0)
         self.layer_count_label.configure(text=f"{self._count_layers()} lớp")
+        self.after_idle(self._sync_layer_list_scroll)
         self._refresh_info()
 
     def _build_layer_rows(self, layers, depth):
@@ -3708,6 +4047,20 @@ class App(tk.Tk):
         name.pack(side="left", fill="x", expand=True, padx=(0, 10))
         bg_widgets.append(name)
 
+        badge_text = (
+            layer.group_tag if layer.children else layer.text_format
+        )
+        if badge_text:
+            badge = tk.Label(
+                row,
+                text=badge_text,
+                font=("Segoe UI", 8, "bold"),
+                fg=ACCENT,
+                bg=row_bg,
+            )
+            badge.pack(side="right", padx=(0, 6))
+            bg_widgets.append(badge)
+
         for widget in (row, thumb, name):
             widget.bind(
                 "<Button-1>", lambda event, l=layer: self._on_layer_press(event, l)
@@ -3726,6 +4079,10 @@ class App(tk.Tk):
         row._layer_bg_widgets = bg_widgets
         row._layer_eye = eye
         row._layer_expander = expander if layer.children else None
+
+        for widget in row.winfo_children():
+            widget.bind("<MouseWheel>", self._on_layer_mousewheel)
+        row.bind("<MouseWheel>", self._on_layer_mousewheel)
 
     def _toggle_expanded(self, layer):
         layer.expanded = not layer.expanded
@@ -3746,6 +4103,32 @@ class App(tk.Tk):
         self._drag_moved = False
         self._drag_blocked = False
         self._drag_in_panel = True
+
+    def _add_format_menu(self, parent, layer, options, current, setter):
+        format_menu = tk.Menu(
+            parent,
+            tearoff=0,
+            bg=PANEL_BG,
+            fg=TEXT,
+            activebackground=ACCENT,
+            activeforeground=TEXT,
+            selectcolor=ACCENT,
+            bd=0,
+        )
+        variables = []
+        for value, label in options:
+            variable = tk.BooleanVar(value=current == value)
+            variables.append(variable)
+            format_menu.add_checkbutton(
+                label=label,
+                variable=variable,
+                onvalue=True,
+                offvalue=False,
+                command=lambda v=value, target=layer: setter(target, v),
+            )
+        format_menu._check_vars = variables
+        parent.add_cascade(label="Định dạng", menu=format_menu)
+        return format_menu
 
     def _on_layer_context(self, event, layer):
         if layer not in self.selected_layers:
@@ -3782,6 +4165,36 @@ class App(tk.Tk):
                 ),
             )
         menu.add_cascade(label="Xuất layer", menu=export_menu)
+        if layer.children:
+            menu.add_separator()
+            self._add_format_menu(
+                menu,
+                layer,
+                (
+                    ("text", "Text"),
+                    ("h1", "H1"),
+                    ("h2", "H2"),
+                    ("h3", "H3"),
+                    ("h4", "H4"),
+                    ("h5", "H5"),
+                    ("h6", "H6"),
+                ),
+                layer.group_tag,
+                self._set_group_format,
+            )
+        elif self._layer_text_style(layer) is not None:
+            menu.add_separator()
+            self._add_format_menu(
+                menu,
+                layer,
+                (
+                    ("text", "Text"),
+                    ("span", "Span"),
+                    ("strong", "Strong"),
+                ),
+                layer.text_format,
+                self._set_text_format,
+            )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -3885,7 +4298,11 @@ class App(tk.Tk):
     def _is_in_layer_panel(self, x_root, y_root):
         widget = self.winfo_containing(x_root, y_root)
         while widget is not None:
-            if widget is self.layer_list or widget is self.layer_count_label:
+            if (
+                widget is self.layer_list
+                or widget is self.layer_list_canvas
+                or widget is self.layer_count_label
+            ):
                 return True
             if widget is self:
                 return False
@@ -4375,6 +4792,7 @@ class App(tk.Tk):
             self._move_last = (event.x, event.y)
             self._translate_layer(self.active_layer, dx, dy)
             self._render_document()
+            self._refresh_layer_position()
 
     def _on_canvas_release(self, event):
         native_event = event
@@ -4415,6 +4833,7 @@ class App(tk.Tk):
             self.active_layer.items.append(record)
             self._draw_record(record)
             self._refresh_doc_tab()
+            self._refresh_layer_position()
         elif tool == "rect" and self._rect_preview is not None:
             x1, y1 = self._rect_start
             self.doc_canvas.delete(self._rect_preview)
@@ -4864,12 +5283,12 @@ class App(tk.Tk):
                 if stretch_width is not None
                 else record["x2"]
             )
+            border_width, border_color = self._record_border(record, 2)
             self.doc_canvas.create_rectangle(
                 (record["x1"] + dx) * zoom, (record["y1"] + dy) * zoom,
                 (x2 + dx) * zoom, (record["y2"] + dy) * zoom,
-                outline=record.get("border_color")
-                or record.get("color") or BRUSH_COLOR,
-                width=max(1, round(record.get("border_width", 2) * zoom)),
+                outline=border_color,
+                width=max(1, round(border_width * zoom)),
                 fill=record.get("background") or "",
             )
         elif kind == "ellipse":
@@ -4878,12 +5297,12 @@ class App(tk.Tk):
                 if stretch_width is not None
                 else record["x2"]
             )
+            border_width, border_color = self._record_border(record, 2)
             self.doc_canvas.create_oval(
                 (record["x1"] + dx) * zoom, (record["y1"] + dy) * zoom,
                 (x2 + dx) * zoom, (record["y2"] + dy) * zoom,
-                outline=record.get("border_color")
-                or record.get("color") or BRUSH_COLOR,
-                width=max(1, round(record.get("border_width", 2) * zoom)),
+                outline=border_color,
+                width=max(1, round(border_width * zoom)),
                 fill=record.get("background") or "",
             )
         elif kind == "text":
@@ -4908,11 +5327,11 @@ class App(tk.Tk):
             x = (record["x"] + dx) * zoom
             y = (record["y"] + dy) * zoom
             self.doc_canvas.create_image(x, y, image=photo, anchor="nw")
-            border_width = record.get("border_width", 0)
+            border_width, border_color = self._record_border(record)
             if border_width > 0:
                 self.doc_canvas.create_rectangle(
                     x, y, x + width, y + height,
-                    outline=record.get("border_color") or BRUSH_COLOR,
+                    outline=border_color,
                     width=max(1, round(border_width * zoom)),
                 )
 
@@ -6464,15 +6883,9 @@ class App(tk.Tk):
             fill = html.escape(
                 str(record.get("background") or "none"), quote=True
             )
-            stroke = html.escape(
-                str(
-                    record.get("border_color")
-                    or record.get("color")
-                    or BRUSH_COLOR
-                ),
-                quote=True,
-            )
-            stroke_width = max(1, round(record.get("border_width", 2)))
+            border_width, border_color = self._record_border(record, 2)
+            stroke = html.escape(border_color or "none", quote=True)
+            stroke_width = max(1, round(border_width))
             if kind == "rect":
                 return (
                     f'  <rect x="{self._css_num(x1)}" '
@@ -6592,11 +7005,9 @@ class App(tk.Tk):
             f'href="data:{mime};base64,{data}" '
             f'preserveAspectRatio="none"/>'
         ]
-        border_width = record.get("border_width", 0)
+        border_width, border_color = self._record_border(record)
         if border_width > 0:
-            stroke = html.escape(
-                str(record.get("border_color") or BRUSH_COLOR), quote=True
-            )
+            stroke = html.escape(border_color, quote=True)
             parts.append(
                 f'  <rect x="{self._css_num(record["x"] + dx)}" '
                 f'y="{self._css_num(record["y"] + dy)}" '
@@ -6870,8 +7281,12 @@ class App(tk.Tk):
         html_lines = []
         self._collect_html_layers(self.layers, html_lines, 1)
         flow, body_padding = self._export_flow()
+        bare_props = {}
+        self._collect_css_rules(self.layers, [], flow, bare_props=bare_props)
         css_lines = []
-        self._collect_css_rules(self.layers, css_lines, flow)
+        self._collect_css_rules(
+            self.layers, css_lines, flow, bare_props=bare_props
+        )
         page_lines = [
             "body {",
             "  margin: 0;",
@@ -6898,11 +7313,28 @@ class App(tk.Tk):
         page_lines.append("}")
         page_css = "\n".join(page_lines)
         css = "\n".join(css_lines)
+        parts = [page_css]
+        if self._has_visible_text(self.layers):
+            parts.append(
+                "p, h1, h2, h3, h4, h5, h6 {\n  margin: 0;\n}"
+            )
         if css:
-            css = f"{page_css}\n\n{css}"
-        else:
-            css = page_css
+            parts.append(css)
+        css = "\n\n".join(parts)
         return "\n".join(html_lines), css
+
+    @staticmethod
+    def _has_visible_text(layers):
+        for layer in layers:
+            if not layer.visible:
+                continue
+            if any(
+                record.get("type") == "text" for record in layer.items
+            ):
+                return True
+            if App._has_visible_text(layer.children):
+                return True
+        return False
 
     def _write_html(self, path):
         html_body, css = self._build_export_content()
@@ -6998,6 +7430,49 @@ class App(tk.Tk):
                 output = image.convert("RGB")
             output.save(target, format="JPEG", quality=90)
 
+    def _group_direct_text_layers(self, layer):
+        result = []
+        for child in layer.children:
+            if not child.visible:
+                continue
+            if child.children or self._layer_text_style(child) is None:
+                return []
+            result.append(child)
+        return result
+
+    def _group_inline_mode(self, layer):
+        if not layer.group_tag:
+            return False
+        return bool(self._group_direct_text_layers(layer))
+
+    def _group_inline_tag(self, layer):
+        if layer.group_tag == "text":
+            return "p"
+        if layer.group_tag in TEXT_TAGS:
+            return layer.group_tag
+        return "div"
+
+    def _group_inline_content(self, layer):
+        parts = []
+        for child in self._group_direct_text_layers(layer):
+            record = [
+                item for item in child.items if item.get("type") == "text"
+            ][-1]
+            content = html.escape(
+                str(record.get("text", ""))
+            ).replace("\n", "<br>")
+            if child.text_format in ("span", "strong"):
+                class_name = html.escape(
+                    self._layer_class_name(child.name), quote=True
+                )
+                tag = child.text_format
+                parts.append(
+                    f'<{tag} class="{class_name}">{content}</{tag}>'
+                )
+            else:
+                parts.append(content)
+        return "".join(parts)
+
     def _collect_html_layers(self, layers, lines, depth):
         indent = "  " * depth
         for layer in layers:
@@ -7007,9 +7482,17 @@ class App(tk.Tk):
                 self._layer_class_name(layer.name), quote=True
             )
             if layer.children:
-                lines.append(f'{indent}<div class="{class_name}">')
-                self._collect_html_layers(layer.children, lines, depth + 1)
-                lines.append(f"{indent}</div>")
+                if self._group_inline_mode(layer):
+                    tag = self._group_inline_tag(layer)
+                    content = self._group_inline_content(layer)
+                    lines.append(
+                        f'{indent}<{tag} class="{class_name}">'
+                        f"{content}</{tag}>"
+                    )
+                else:
+                    lines.append(f'{indent}<div class="{class_name}">')
+                    self._collect_html_layers(layer.children, lines, depth + 1)
+                    lines.append(f"{indent}</div>")
             elif self._layer_text_style(layer) is not None:
                 for record in layer.items:
                     if record.get("type") != "text":
@@ -7017,8 +7500,16 @@ class App(tk.Tk):
                     content = html.escape(
                         str(record.get("text", ""))
                     ).replace("\n", "<br>")
-                    tag = self._text_tag(record)
-                    if class_name == tag:
+                    text_format = layer.text_format
+                    if text_format == "text":
+                        lines.append(f"{indent}{content}")
+                        continue
+                    tag = (
+                        text_format
+                        if text_format in ("span", "strong")
+                        else self._text_tag(record)
+                    )
+                    if class_name == tag and not text_format:
                         lines.append(f"{indent}<{tag}>{content}</{tag}>")
                     else:
                         lines.append(
@@ -7179,7 +7670,13 @@ class App(tk.Tk):
             collect(layers)
             padding = 0
             if items:
-                padding = max(items[0]["y"] - origin_y, 0)
+                first = items[0]["layer"]
+                position = self._layer_position(first)
+                padding = (
+                    max(position[1], 0)
+                    if position is not None
+                    else max(items[0]["y"] - origin_y, 0)
+                )
             for index, item in enumerate(items):
                 entry = flow.setdefault(id(item["layer"]), {})
                 entry["left"] = item["x"] - origin_x
@@ -7192,12 +7689,64 @@ class App(tk.Tk):
 
         return walk(self.layers, 0.0, 0.0)
 
+    def _group_text_donor(self, layer):
+        texts = self._group_direct_text_layers(layer)
+        if not texts:
+            return None
+        if self._group_inline_mode(layer):
+            return texts[-1]
+        for child in reversed(texts):
+            if child.text_format == "text":
+                return child
+        return None
+
+    def _group_inline_text_style(self, layer):
+        if not layer.children:
+            return None
+        donor = self._group_text_donor(layer)
+        if donor is None:
+            return None
+        return self._layer_text_style(donor)
+
+    def _append_group_inline_typography(self, lines, layer):
+        style = self._group_inline_text_style(layer)
+        if style is None:
+            return
+        lines.append(f"  color: {style['color']};")
+        if style["font_family"] != "none":
+            lines.append(
+                "  font-family: "
+                f"{self._css_font_family(style['font_family'])};"
+            )
+        lines.append(f"  font-size: {self._css_num(style['font_size'])}px;")
+        lines.append(f"  font-weight: {style['font_weight']};")
+        lines.append(
+            "  line-height: " f"{self._css_num(style['line_height'])};"
+        )
+        lines.append(
+            "  letter-spacing: "
+            f"{self._css_num(style['letter_spacing'])}px;"
+        )
+        if style["text_transform"] != "none":
+            lines.append(f"  text-transform: {style['text_transform']};")
+        if style["text_align"] != "left":
+            lines.append(f"  text-align: {style['text_align']};")
+
     def _collect_css_rules(
-        self, layers, lines, flow, parent_display=None, parent_justify="left"
+        self,
+        layers,
+        lines,
+        flow,
+        parent_display=None,
+        parent_justify="left",
+        bare_props=None,
+        inline_parent=False,
     ):
         visible_index = 0
         for layer in layers:
             if not layer.visible:
+                continue
+            if inline_parent and layer.text_format not in ("span", "strong"):
                 continue
             flex_child = parent_display == "flex"
             flex_justify = flex_child and parent_justify != "left"
@@ -7227,7 +7776,12 @@ class App(tk.Tk):
                         fill=fill_child,
                         blend_mode=layer.blend_mode,
                     )
-                self._collect_css_rules(layer.children, lines, flow)
+                self._collect_css_rules(
+                    layer.children,
+                    lines,
+                    flow,
+                    bare_props=bare_props,
+                )
                 continue
             text_style = self._layer_text_style(layer)
             is_group = bool(layer.children)
@@ -7242,25 +7796,74 @@ class App(tk.Tk):
             elif box is None and text_style is None and layer.background_image:
                 box = self._background_css_box(layer)
             if text_style is not None:
+                if layer.text_format == "text":
+                    continue
                 if lines:
                     lines.append("")
                 frame = text_style["text_frame"]
-                selector = (
-                    text_style["tag"]
-                    if class_name == text_style["tag"]
-                    else f".{class_name}"
-                )
+                tag = text_style["tag"]
+                inline = layer.text_format in ("span", "strong")
+                bare = class_name == tag and not inline
+                selector = tag if bare else f".{class_name}"
                 lines.append(f"{selector} {{")
-                lines.append("  margin: 0;")
-                if not skip_bottom:
-                    lines.append(
-                        f"  margin-bottom: {self._css_num(gap)}px;"
+                bottom = (
+                    gap
+                    if (
+                        not inline
+                        and not skip_bottom
+                        and self._css_nonzero(gap)
                     )
-                if text_style["text_align"] == "left" and not skip_left:
-                    lines.append(
-                        f"  margin-left: {self._css_num(left)}px;"
+                    else None
+                )
+                horizontal = (
+                    left
+                    if (
+                        not inline
+                        and text_style["text_align"] == "left"
+                        and not skip_left
+                        and self._css_nonzero(left)
                     )
-                if frame is not None:
+                    else None
+                )
+                if bare:
+                    if bottom is not None:
+                        lines.append(
+                            f"  margin-bottom: {self._css_num(bottom)}px;"
+                        )
+                        if bare_props is not None:
+                            bare_props.setdefault(tag, set()).add(
+                                "margin-bottom"
+                            )
+                    if horizontal is not None:
+                        lines.append(
+                            "  margin-left: "
+                            f"{self._css_num(horizontal)}px;"
+                        )
+                        if bare_props is not None:
+                            bare_props.setdefault(tag, set()).add(
+                                "margin-left"
+                            )
+                else:
+                    resets = (
+                        bare_props.get(tag, ())
+                        if bare_props is not None
+                        else ()
+                    )
+                    if inline:
+                        resets = ()
+                    self._append_text_margin(
+                        lines,
+                        "margin-bottom",
+                        bottom,
+                        "margin-bottom" in resets,
+                    )
+                    self._append_text_margin(
+                        lines,
+                        "margin-left",
+                        horizontal,
+                        "margin-left" in resets,
+                    )
+                if frame is not None and not inline:
                     lines.append(
                         "  width: "
                         f"{self._css_num(frame[2] - frame[0])}px;"
@@ -7274,7 +7877,10 @@ class App(tk.Tk):
                 lines.append(
                     f"  font-size: {self._css_num(text_style['font_size'])}px;"
                 )
-                lines.append(f"  font-weight: {text_style['font_weight']};")
+                weight = text_style["font_weight"]
+                if layer.text_format == "strong":
+                    weight = max(weight, 700)
+                lines.append(f"  font-weight: {weight};")
                 lines.append(
                     "  line-height: "
                     f"{self._css_num(text_style['line_height'])};"
@@ -7293,6 +7899,9 @@ class App(tk.Tk):
                         "  text-align: "
                         f"{text_style['text_align']};"
                     )
+                display = self._layer_display(layer)
+                if display != "block" and not inline:
+                    lines.append(f"  display: {display};")
                 if layer.blend_mode != "normal":
                     lines.append(
                         f"  mix-blend-mode: {layer.blend_mode};"
@@ -7303,8 +7912,7 @@ class App(tk.Tk):
                     lines.append("")
                 lines.append(f".{class_name} {{")
                 if layer.children and self._layer_align(layer) != "left":
-                    lines.append("  margin: 0;")
-                    if not skip_bottom:
+                    if not skip_bottom and self._css_nonzero(gap):
                         lines.append(
                             f"  margin-bottom: {self._css_num(gap)}px;"
                         )
@@ -7364,6 +7972,7 @@ class App(tk.Tk):
                     self._append_group_gap(lines, layer)
                     self._append_group_justify(lines, layer)
                     self._append_group_align(lines, layer)
+                self._append_group_inline_typography(lines, layer)
                 if layer.blend_mode != "normal":
                     lines.append(
                         f"  mix-blend-mode: {layer.blend_mode};"
@@ -7374,11 +7983,13 @@ class App(tk.Tk):
                 align = self._layer_align(layer)
                 justify = self._layer_justify(layer)
                 gap = self._layer_gap(layer)
+                inline_style = self._group_inline_text_style(layer)
                 if (
                     display != "block"
                     or align != "left"
                     or (display == "flex" and justify != "left")
                     or (display in ("flex", "grid") and gap > 0)
+                    or inline_style is not None
                 ):
                     if lines:
                         lines.append("")
@@ -7388,6 +7999,7 @@ class App(tk.Tk):
                     self._append_group_gap(lines, layer)
                     self._append_group_justify(lines, layer)
                     self._append_group_align(lines, layer)
+                    self._append_group_inline_typography(lines, layer)
                     lines.append("}")
             self._collect_css_rules(
                 layer.children,
@@ -7395,13 +8007,21 @@ class App(tk.Tk):
                 flow,
                 self._layer_display(layer) if layer.children else None,
                 self._layer_justify(layer) if layer.children else "left",
+                bare_props,
+                self._group_inline_mode(layer) if layer.children else False,
             )
+
+    def _append_text_margin(self, lines, prop, value, reset):
+        if value is not None:
+            lines.append(f"  {prop}: {self._css_num(value)}px;")
+        elif reset:
+            lines.append(f"  {prop}: 0;")
 
     def _append_group_gap(self, lines, layer):
         if self._layer_display(layer) not in ("flex", "grid"):
             return
         gap = self._layer_gap(layer)
-        if gap:
+        if self._css_nonzero(gap):
             lines.append(f"  gap: {self._css_num(gap)}px;")
 
     def _append_group_justify(self, lines, layer):
@@ -7426,10 +8046,9 @@ class App(tk.Tk):
     def _append_flow_margins(
         self, lines, left, gap, skip_left=False, skip_bottom=False
     ):
-        lines.append("  margin: 0;")
-        if not skip_bottom:
+        if not skip_bottom and self._css_nonzero(gap):
             lines.append(f"  margin-bottom: {self._css_num(gap)}px;")
-        if not skip_left:
+        if not skip_left and self._css_nonzero(left):
             lines.append(f"  margin-left: {self._css_num(left)}px;")
 
     def _append_image_css(
@@ -7456,11 +8075,11 @@ class App(tk.Tk):
             "  height: "
             f"{self._css_num(record.get('height', 0))}px;"
         )
-        border_width = record.get("border_width", 0)
+        border_width, border_color = self._record_border(record)
         if border_width > 0:
             lines.append(
                 f"  border: {self._css_num(border_width)}px solid "
-                f"{record.get('border_color') or BRUSH_COLOR};"
+                f"{border_color};"
             )
         if blend_mode != "normal":
             lines.append(f"  mix-blend-mode: {blend_mode};")
@@ -7472,18 +8091,15 @@ class App(tk.Tk):
         ]
         if shapes:
             shape = shapes[-1]
+            border_width, border_color = self._record_border(shape, 2)
             box = {
                 "x": shape["x1"],
                 "y": shape["y1"],
                 "width": max(shape["x2"] - shape["x1"], 1),
                 "height": max(shape["y2"] - shape["y1"], 1),
                 "background": shape.get("background") or "",
-                "border_color": (
-                    shape.get("border_color")
-                    or shape.get("color")
-                    or BRUSH_COLOR
-                ),
-                "border_width": shape.get("border_width", 2),
+                "border_color": border_color,
+                "border_width": border_width,
             }
             if shape.get("type") == "ellipse":
                 box["border_radius"] = "50%"
@@ -7501,6 +8117,19 @@ class App(tk.Tk):
             "border_color": "",
             "border_width": 0,
         }
+
+    def _record_border(self, record, default_width=0):
+        width = record.get("border_width", default_width)
+        color = record.get("border_color")
+        if color is None:
+            color = record.get("color") or BRUSH_COLOR
+        try:
+            width = float(width)
+        except (TypeError, ValueError):
+            width = 0
+        if width <= 0 or not color:
+            return 0, ""
+        return width, color
 
     def _background_css_box(self, layer):
         x1, y1, x2, y2 = self._layer_background_bounds(layer)
@@ -7571,6 +8200,9 @@ class App(tk.Tk):
         if number.is_integer():
             return str(int(number))
         return f"{number:.2f}".rstrip("0").rstrip(".")
+
+    def _css_nonzero(self, value):
+        return self._css_num(value) not in ("0", "-0")
 
     def _css_font_family(self, family):
         raw = str(family).strip()
