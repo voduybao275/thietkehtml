@@ -1,0 +1,167 @@
+{
+  "format": "dbw",
+  "version": 2,
+  "content_width": 960,
+  "content_height": 540,
+  "content_full": false,
+  "content_background": "white",
+  "body_font_family": "Yu Gothic",
+  "guides": [],
+  "layers": [
+    {
+      "name": "Lớp 1",
+      "visible": true,
+      "expanded": true,
+      "display": "block",
+      "align": "left",
+      "justify": "left",
+      "gap": 0,
+      "blend_mode": "normal",
+      "text_format": "",
+      "group_tag": "",
+      "pseudo": {},
+      "items": [],
+      "background_image": null,
+      "children": []
+    },
+    {
+      "name": "Nhóm 1",
+      "visible": true,
+      "expanded": true,
+      "display": "block",
+      "align": "center",
+      "justify": "left",
+      "gap": 0,
+      "blend_mode": "normal",
+      "text_format": "",
+      "group_tag": "",
+      "pseudo": {},
+      "items": [
+        {
+          "type": "rect",
+          "x1": 39.0,
+          "y1": 13.0,
+          "x2": 939.0,
+          "y2": 513.0,
+          "color": "#2563eb",
+          "border_color": "#2563eb",
+          "border_width": 2,
+          "background": ""
+        }
+      ],
+      "background_image": null,
+      "children": [
+        {
+          "name": "title-en",
+          "visible": true,
+          "expanded": true,
+          "display": "block",
+          "align": "left",
+          "justify": "left",
+          "gap": 0,
+          "blend_mode": "normal",
+          "text_format": "",
+          "group_tag": "",
+          "pseudo": {},
+          "items": [
+            {
+              "type": "text",
+              "x": 230.0,
+              "y": 65.0,
+              "text": "Medical",
+              "color": "#4f545a",
+              "font_family": "none",
+              "font_size": 50,
+              "font_weight": 400,
+              "line_height": 1.4,
+              "letter_spacing": 0,
+              "text_transform": "none",
+              "text_align": "center",
+              "text_tag": "p"
+            }
+          ],
+          "background_image": null,
+          "children": []
+        },
+        {
+          "name": "title-jp",
+          "visible": true,
+          "expanded": true,
+          "display": "block",
+          "align": "left",
+          "justify": "left",
+          "gap": 0,
+          "blend_mode": "normal",
+          "text_format": "",
+          "group_tag": "",
+          "pseudo": {
+            "before": {
+              "enabled": true,
+              "content": "",
+              "position": "absolute",
+              "top": "",
+              "left": "50%",
+              "bottom": "0",
+              "right": "",
+              "transform": "translateX(-50%)",
+              "color": "",
+              "background": "#f00",
+              "width": "100%",
+              "height": "1",
+              "margin": "",
+              "padding": "",
+              "font_size": "",
+              "font_weight": "",
+              "display": "",
+              "extra": ""
+            },
+            "after": {
+              "enabled": false,
+              "content": "",
+              "position": "absolute",
+              "top": "",
+              "left": "",
+              "bottom": "",
+              "right": "",
+              "transform": "",
+              "color": "",
+              "background": "",
+              "width": "",
+              "height": "",
+              "margin": "",
+              "padding": "",
+              "font_size": "",
+              "font_weight": "",
+              "display": "",
+              "extra": ""
+            }
+          },
+          "items": [
+            {
+              "type": "text",
+              "x": 39.0,
+              "y": 225.0,
+              "text": "診療案内",
+              "color": "#676767",
+              "font_family": "none",
+              "font_size": 20,
+              "font_weight": 400,
+              "line_height": 1.4,
+              "letter_spacing": 0,
+              "text_transform": "none",
+              "text_align": "left",
+              "text_tag": "p"
+            }
+          ],
+          "background_image": null,
+          "children": []
+        }
+      ]
+    }
+  ],
+  "active_layer_path": [
+    1,
+    1
+  ],
+  "layer_counter": 4
+}

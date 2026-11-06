@@ -1,36 +1,54 @@
 body {
   margin: 0;
   background: #ffffff;
-  width: 1216px;
-  height: 1130px;
+  padding-top: 13px;
+  box-sizing: border-box;
+  width: 960px;
+  height: 540px;
+  font-family: "Yu Gothic";
 }
 
-.Background {
+p, h1, h2, h3, h4, h5, h6 {
   margin: 0;
-  margin-bottom: -900px;
-  margin-left: 0px;
+}
+
+.Nhóm-1 {
+  padding-top: 52px;
+  width: 900px;
+  height: 500px;
+  border: 2px solid #2563eb;
   display: block;
-  width: 1216px;
-  height: 1130px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
-.Võ-Duy-Bảo {
-  margin: 0;
-  margin-bottom: 140px;
-  margin-left: 314px;
-  color: #e62828;
-  font-family: "MyriadPro";
+.title-en {
+  margin-bottom: 8px;
+  color: #4f545a;
   font-size: 50px;
   font-weight: 400;
-  line-height: 1.2;
+  line-height: 1.4;
   letter-spacing: 0px;
+  text-align: center;
 }
 
-.Rectangle-1 {
-  margin: 0;
-  margin-bottom: 0px;
-  margin-left: 208px;
-  width: 652px;
-  height: 388px;
-  background: #1b08d7;
+.title-jp {
+  color: #676767;
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0px;
+  text-align: center;
+  position: relative;
+}
+
+.title-jp::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0px;
+  transform: translateX(-50%);
+  width: 100%;
+  height: 1px;
+  background: #f00;
 }

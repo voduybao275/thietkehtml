@@ -3,6 +3,7 @@ import html
 import json
 import math
 import os
+import re
 import tkinter as tk
 from collections import Counter
 from io import BytesIO
@@ -252,6 +253,33 @@ GROUP_ALIGNS = ("left", "center", "right")
 
 GROUP_JUSTIFIES = ("left", "center", "right", "between")
 
+PSEUDO_KEYS = ("before", "after")
+
+PSEUDO_DISPLAYS = ("", "block", "inline-block", "inline", "none", "flex")
+
+PSEUDO_POSITIONS = ("absolute", "relative", "fixed", "sticky", "static")
+
+PSEUDO_DEFAULTS = {
+    "enabled": False,
+    "content": "",
+    "position": "absolute",
+    "top": "",
+    "left": "",
+    "bottom": "",
+    "right": "",
+    "transform": "",
+    "color": "",
+    "background": "",
+    "width": "",
+    "height": "",
+    "margin": "",
+    "padding": "",
+    "font_size": "",
+    "font_weight": "",
+    "display": "",
+    "extra": "",
+}
+
 SHORTCUTS = [
     ("F1", "Mở/đóng tab hướng dẫn phím tắt"),
     ("Ctrl + N", "Tạo project mới"),
@@ -286,6 +314,7 @@ class Layer:
         self.blend_mode = "normal"
         self.text_format = ""
         self.group_tag = ""
+        self.pseudo = {}
 
 
 class _DocEvent:
@@ -406,6 +435,7 @@ class App(tk.Tk):
         self._move_last = None
         self._move_moved = False
         self._export_window = None
+        self._layer_options_window = None
         self._image_refs = {}
         self._image_scaled = {}
         self._text_areas = []
@@ -2454,6 +2484,37 @@ class App(tk.Tk):
             return 0
         return max(value, 0)
 
+    def _normalize_pseudo(self, data):
+        result = {}
+        if not isinstance(data, dict):
+            return result
+        for key in PSEUDO_KEYS:
+            value = data.get(key)
+            if not isinstance(value, dict):
+                continue
+            normalized = dict(PSEUDO_DEFAULTS)
+            normalized["enabled"] = bool(value.get("enabled"))
+            for name in PSEUDO_DEFAULTS:
+                if name == "enabled":
+                    continue
+                if isinstance(value.get(name), str):
+                    normalized[name] = value[name]
+            if normalized["position"] not in PSEUDO_POSITIONS:
+                normalized["position"] = "absolute"
+            result[key] = normalized
+        return result
+
+    def _layer_pseudo(self, layer, key):
+        if layer is None:
+            return dict(PSEUDO_DEFAULTS)
+        data = self._normalize_pseudo(getattr(layer, "pseudo", None))
+        return data.get(key, dict(PSEUDO_DEFAULTS))
+
+    def _layer_has_pseudo(self, layer):
+        return any(
+            self._layer_pseudo(layer, key)["enabled"] for key in PSEUDO_KEYS
+        )
+
     def _apply_group_justify(self, value):
         layer = self.active_layer
         if layer is None or not layer.children:
@@ -3588,6 +3649,7 @@ class App(tk.Tk):
         clone.blend_mode = layer.blend_mode
         clone.text_format = layer.text_format
         clone.group_tag = layer.group_tag
+        clone.pseudo = self._normalize_pseudo(layer.pseudo)
         clone.background_image = (
             dict(layer.background_image) if layer.background_image else None
         )
@@ -3810,6 +3872,7 @@ class App(tk.Tk):
             "blend_mode": layer.blend_mode,
             "text_format": layer.text_format,
             "group_tag": layer.group_tag,
+            "pseudo": self._normalize_pseudo(getattr(layer, "pseudo", None)),
             "items": [dict(item) for item in layer.items],
             "background_image": (
                 dict(layer.background_image)
@@ -3855,6 +3918,7 @@ class App(tk.Tk):
             layer.group_tag = (
                 group_tag if group_tag in GROUP_FORMATS else ""
             )
+            layer.pseudo = self._normalize_pseudo(item.get("pseudo"))
             layer.items = [dict(record) for record in item["items"]]
             background = item.get("background_image")
             if (
@@ -3907,6 +3971,7 @@ class App(tk.Tk):
             "blend_mode": layer.blend_mode,
             "text_format": layer.text_format,
             "group_tag": layer.group_tag,
+            "pseudo": self._normalize_pseudo(getattr(layer, "pseudo", None)),
             "items": layer.items,
             "background_image": layer.background_image,
             "children": [self._layer_signature(child) for child in layer.children],
@@ -4165,6 +4230,10 @@ class App(tk.Tk):
                 ),
             )
         menu.add_cascade(label="Xuất layer", menu=export_menu)
+        menu.add_command(
+            label="Tùy chọn CSS (::before / ::after)…",
+            command=lambda target=layer: self._open_layer_options(target),
+        )
         if layer.children:
             menu.add_separator()
             self._add_format_menu(
@@ -4200,6 +4269,356 @@ class App(tk.Tk):
         finally:
             menu.grab_release()
         return "break"
+
+    def _open_layer_options(self, layer):
+        self._commit_text_editor()
+        window = self._layer_options_window
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_force()
+            return
+
+        window = tk.Toplevel(self)
+        self._layer_options_window = window
+        window.title(f"Tùy chọn CSS — {layer.name}")
+        window.configure(bg=PANEL_BG)
+        window.resizable(False, False)
+        window.transient(self)
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._close_layer_options(window),
+        )
+        window.bind(
+            "<Escape>", lambda _e: self._close_layer_options(window)
+        )
+
+        body = tk.Frame(window, bg=PANEL_BG, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(
+            body,
+            text="Tùy chọn CSS",
+            font=self.font_brand,
+            fg=TEXT,
+            bg=PANEL_BG,
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="Thiết lập ::before và ::after cho layer. Các khai báo "
+            "được thêm vào style.css khi export HTML. Position mặc định "
+            "là absolute; Top/Left/Bottom/Right nhận px hoặc %. Chọn "
+            "Display: inline-block nếu muốn width/height có hiệu lực.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 14))
+
+        sections = tk.Frame(body, bg=PANEL_BG)
+        sections.pack(fill="both", expand=True)
+        forms = {}
+        for column, pseudo in enumerate(PSEUDO_KEYS):
+            sections.grid_columnconfigure(column, weight=1)
+            forms[pseudo] = self._build_pseudo_form(
+                sections, layer, pseudo, column
+            )
+
+        actions = tk.Frame(body, bg=PANEL_BG)
+        actions.pack(fill="x", pady=(16, 0))
+        tk.Button(
+            actions,
+            text="Hủy",
+            command=lambda: self._close_layer_options(window),
+            font=self.font_menu,
+            fg=TEXT,
+            bg=BORDER,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right")
+        tk.Button(
+            actions,
+            text="Lưu",
+            command=lambda: self._save_layer_options(layer, forms, window),
+            font=self.font_menu,
+            fg=BG,
+            bg=ACCENT,
+            activebackground="#60a5fa",
+            activeforeground=BG,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right", padx=(0, 8))
+
+        window.update_idletasks()
+        width = window.winfo_reqwidth()
+        height = window.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 3
+        window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _build_pseudo_form(self, parent, layer, pseudo, column):
+        data = self._layer_pseudo(layer, pseudo)
+        frame = tk.LabelFrame(
+            parent,
+            text=f"::{pseudo}",
+            font=self.font_panel,
+            fg=MUTED,
+            bg=PANEL_BG,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            padx=12,
+            pady=10,
+        )
+        frame.grid(
+            row=0,
+            column=column,
+            sticky="nsew",
+            padx=(0, 8) if column == 0 else (8, 0),
+        )
+        frame.grid_columnconfigure(1, weight=1)
+        frame.grid_columnconfigure(3, weight=1)
+
+        enabled = tk.BooleanVar(value=data["enabled"])
+        tk.Checkbutton(
+            frame,
+            text="Bật",
+            variable=enabled,
+            font=("Segoe UI", 9, "bold"),
+            fg=TEXT,
+            bg=PANEL_BG,
+            activebackground=PANEL_BG,
+            activeforeground=TEXT,
+            selectcolor=BG,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        variables = {}
+
+        def add_field(row, column_index, key, title, width=12):
+            tk.Label(
+                frame,
+                text=title,
+                font=("Segoe UI", 9),
+                fg=MUTED,
+                bg=PANEL_BG,
+                anchor="w",
+            ).grid(row=row, column=column_index, sticky="w", pady=3)
+            variable = tk.StringVar(value=data[key])
+            entry = tk.Entry(
+                frame,
+                textvariable=variable,
+                width=width,
+                font=("Segoe UI", 9),
+                fg=TEXT,
+                bg="#0b1220",
+                insertbackground=TEXT,
+                relief="flat",
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                highlightcolor=ACCENT,
+            )
+            entry.grid(
+                row=row,
+                column=column_index + 1,
+                sticky="ew",
+                padx=(4, 12),
+                pady=3,
+            )
+            variables[key] = variable
+            return entry
+
+        tk.Label(
+            frame,
+            text="Content",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="w", pady=3)
+        content_var = tk.StringVar(value=data["content"])
+        variables["content"] = content_var
+        tk.Entry(
+            frame,
+            textvariable=content_var,
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            insertbackground=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+        ).grid(row=1, column=1, columnspan=3, sticky="ew", pady=3)
+
+        add_field(2, 0, "color", "Màu chữ")
+        add_field(2, 2, "background", "Nền")
+        add_field(3, 0, "width", "Width (px)")
+        add_field(3, 2, "height", "Height (px)")
+        add_field(4, 0, "margin", "Margin")
+        add_field(4, 2, "padding", "Padding")
+        add_field(5, 0, "font_size", "Font-size (px)")
+        add_field(5, 2, "font_weight", "Font-weight")
+
+        def add_menu(row, column_index, key, title, options):
+            tk.Label(
+                frame,
+                text=title,
+                font=("Segoe UI", 9),
+                fg=MUTED,
+                bg=PANEL_BG,
+                anchor="w",
+            ).grid(row=row, column=column_index, sticky="w", pady=3)
+            labels = {value: label for label, value in options}
+            reverse = {label: value for value, label in labels.items()}
+            current = data[key] if data[key] in labels else options[0][1]
+            variable = tk.StringVar(value=labels[current])
+            menu = tk.OptionMenu(frame, variable, *labels.values())
+            menu.configure(
+                font=("Segoe UI", 9),
+                fg=TEXT,
+                bg="#0b1220",
+                activebackground=HOVER_BG,
+                activeforeground=TEXT,
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                highlightcolor=ACCENT,
+                relief="flat",
+                bd=0,
+                width=12,
+                anchor="center",
+                cursor="hand2",
+            )
+            menu["menu"].configure(
+                font=("Segoe UI", 9),
+                fg=TEXT,
+                bg=PANEL_BG,
+                activebackground=ACCENT,
+                activeforeground=TEXT,
+            )
+            menu.grid(
+                row=row,
+                column=column_index + 1,
+                sticky="ew",
+                padx=(4, 12),
+                pady=3,
+            )
+            return variable, reverse
+
+        display_var, display_reverse = add_menu(
+            6,
+            0,
+            "display",
+            "Display",
+            (
+                ("Mặc định", ""),
+                ("block", "block"),
+                ("inline-block", "inline-block"),
+                ("inline", "inline"),
+                ("none", "none"),
+                ("flex", "flex"),
+            ),
+        )
+        position_var, position_reverse = add_menu(
+            6,
+            2,
+            "position",
+            "Position",
+            tuple((name, name) for name in PSEUDO_POSITIONS),
+        )
+
+        add_field(7, 0, "top", "Top (px/%)")
+        add_field(7, 2, "left", "Left (px/%)")
+        add_field(8, 0, "bottom", "Bottom (px/%)")
+        add_field(8, 2, "right", "Right (px/%)")
+        transform_entry = add_field(9, 0, "transform", "Transform")
+        transform_entry.grid_configure(columnspan=3)
+
+        tk.Label(
+            frame,
+            text="CSS bổ sung",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="nw",
+        ).grid(row=10, column=0, sticky="nw", pady=(6, 3))
+        extra = tk.Text(
+            frame,
+            width=28,
+            height=4,
+            wrap="word",
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            insertbackground=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+        )
+        extra.insert("1.0", data["extra"])
+        extra.grid(
+            row=10,
+            column=1,
+            columnspan=3,
+            sticky="ew",
+            pady=(6, 3),
+        )
+
+        return {
+            "enabled": enabled,
+            "fields": variables,
+            "display": (display_var, display_reverse),
+            "position": (position_var, position_reverse),
+            "extra": extra,
+        }
+
+    def _save_layer_options(self, layer, forms, window):
+        pseudo = {}
+        for key in PSEUDO_KEYS:
+            form = forms[key]
+            data = {
+                name: variable.get().strip()
+                for name, variable in form["fields"].items()
+            }
+            data["enabled"] = bool(form["enabled"].get())
+            display_var, display_reverse = form["display"]
+            data["display"] = display_reverse.get(
+                display_var.get(), ""
+            )
+            position_var, position_reverse = form["position"]
+            data["position"] = position_reverse.get(
+                position_var.get(), "absolute"
+            )
+            data["extra"] = form["extra"].get("1.0", "end").strip()
+            pseudo[key] = data
+        normalized = self._normalize_pseudo(pseudo)
+        if normalized == self._normalize_pseudo(layer.pseudo):
+            self._close_layer_options(window)
+            return
+        self._push_history()
+        layer.pseudo = normalized
+        self._close_layer_options(window)
+        self._render_document()
+        self._refresh_doc_tab()
+        self._flash_status(
+            f"Đã lưu tùy chọn CSS cho layer '{layer.name}'."
+        )
+
+    def _close_layer_options(self, window):
+        if window is not None and window.winfo_exists():
+            window.destroy()
+        if self._layer_options_window is window:
+            self._layer_options_window = None
 
     def _begin_rename(self, layer, label):
         entry = self._rename_entry
@@ -5171,8 +5590,14 @@ class App(tk.Tk):
             return None
         return (x1, y1, x2, y2)
 
-    def _text_block_start(self, record, block_width):
+    def _text_block_start(self, record, block_width, layer=None):
         frame = self._text_frame(record)
+        if frame is None:
+            if self._text_align_state(record) == "none":
+                return record["x"]
+            if self._text_align(record) == "left":
+                return record["x"]
+            frame = self._text_group_frame(layer)
         if frame is None:
             return record["x"]
         x1, _y1, x2, _y2 = frame
@@ -5183,6 +5608,33 @@ class App(tk.Tk):
         if align == "right":
             return x1 + frame_width - block_width
         return x1
+
+    def _text_group_frame(self, layer):
+        group = layer.parent if layer is not None else None
+        if group is None:
+            return None
+        shapes = []
+
+        def collect(item_layer):
+            for record in item_layer.items:
+                if record.get("type") in ("rect", "ellipse"):
+                    shapes.append(record)
+            for child in item_layer.children:
+                if child.visible:
+                    collect(child)
+
+        collect(group)
+        if shapes:
+            shape = max(
+                shapes, key=lambda record: record["x2"] - record["x1"]
+            )
+            return (shape["x1"], shape["y1"], shape["x2"], shape["y2"])
+        bounds = self._layer_content_bounds(group)
+        if bounds is None:
+            if not group.background_image:
+                return None
+            bounds = self._layer_background_bounds(group)
+        return bounds
 
     def _text_display_text(self, record):
         text = str(record.get("text", ""))
@@ -5215,13 +5667,15 @@ class App(tk.Tk):
         height = advance * (len(lines) - 1) + font.metrics("linespace")
         return font, lines, widths, advance, letter_spacing, height
 
-    def _draw_text_record(self, record, dx=0.0, dy=0.0):
+    def _draw_text_record(self, record, dx=0.0, dy=0.0, layer=None):
         font, lines, widths, advance, letter_spacing, height = (
             self._text_metrics(record)
         )
         y = record["y"] + dy
         block_width = max(widths, default=0)
-        block_start = self._text_block_start(record, block_width) + dx
+        block_start = (
+            self._text_block_start(record, block_width, layer) + dx
+        )
         self._text_areas.append(
             (record, block_start, y, block_start + block_width, y + height)
         )
@@ -5254,7 +5708,9 @@ class App(tk.Tk):
                     anchor="nw",
                 )
 
-    def _draw_record(self, record, dx=0.0, dy=0.0, stretch_width=None):
+    def _draw_record(
+        self, record, dx=0.0, dy=0.0, stretch_width=None, layer=None
+    ):
         kind = record["type"]
         zoom = self.zoom
         self._record_offsets[id(record)] = (dx, dy)
@@ -5306,7 +5762,7 @@ class App(tk.Tk):
                 fill=record.get("background") or "",
             )
         elif kind == "text":
-            self._draw_text_record(record, dx, dy)
+            self._draw_text_record(record, dx, dy, layer)
         elif kind == "image":
             photo = self._image_refs.get(id(record))
             if photo is None:
@@ -5366,8 +5822,9 @@ class App(tk.Tk):
             if not layer.visible:
                 continue
             self._draw_layer_background(layer, dx, dy, stretch_width)
+            self._draw_layer_pseudo(layer, "before", dx, dy)
             for record in layer.items:
-                self._draw_record(record, dx, dy, stretch_width)
+                self._draw_record(record, dx, dy, stretch_width, layer)
             offsets = {}
             display = self._layer_display(layer)
             if layer.children and display == "flex":
@@ -5393,6 +5850,7 @@ class App(tk.Tk):
                     children_dx=base_dx if keep_design else None,
                     children_dy=base_dy if keep_design else None,
                 )
+            self._draw_layer_pseudo(layer, "after", dx, dy)
 
     def _is_flex_fill_layer(self, layer):
         if (
@@ -5527,6 +5985,416 @@ class App(tk.Tk):
         self.doc_canvas.create_image(
             x1 * zoom, y1 * zoom, image=photo, anchor="nw"
         )
+
+    def _pseudo_token(self, token):
+        token = str(token).strip()
+        if not token:
+            return None, ""
+        for unit in ("px", "%", "deg"):
+            if token.endswith(unit):
+                try:
+                    return float(token[: -len(unit)]), unit
+                except ValueError:
+                    return None, ""
+        try:
+            return float(token), ""
+        except ValueError:
+            return None, ""
+
+    def _pseudo_length_px(self, raw, base=0.0):
+        value, unit = self._pseudo_token(raw)
+        if value is None or unit == "deg":
+            return None
+        if unit == "%":
+            return value / 100.0 * base
+        return value
+
+    def _pseudo_sides(self, raw, base):
+        tokens = str(raw).split()
+        if not tokens:
+            return (0.0, 0.0, 0.0, 0.0)
+        values = []
+        for token in tokens[:4]:
+            value = self._pseudo_length_px(token, base)
+            values.append(value if value is not None else 0.0)
+        if len(values) == 1:
+            return (values[0],) * 4
+        if len(values) == 2:
+            return (values[0], values[1], values[0], values[1])
+        if len(values) == 3:
+            return (values[0], values[1], values[2], values[1])
+        return tuple(values)
+
+    def _pseudo_content(self, data):
+        content = str(data.get("content", "")).strip()
+        if (
+            len(content) >= 2
+            and content[0] == content[-1]
+            and content[0] in "\"'"
+        ):
+            content = content[1:-1]
+        return content.replace("\\A", "\n")
+
+    def _pseudo_extra_rules(self, data):
+        rules = {}
+        for line in str(data.get("extra", "")).splitlines():
+            line = line.strip().rstrip(";")
+            if ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            rules[name.strip().lower()] = value.strip()
+        return rules
+
+    def _pseudo_base_style(self, layer):
+        style = self._layer_text_style(layer)
+        if style is not None:
+            return style
+        donor = self._group_text_donor(layer) if layer.children else None
+        if donor is not None:
+            return self._layer_text_style(donor)
+        return None
+
+    def _pseudo_font(self, data, style, scale):
+        family = style["font_family"] if style else "none"
+        if family == "none":
+            family = (
+                self.body_font_family
+                if self.body_font_family != "none"
+                else "Segoe UI"
+            )
+        size = self._pseudo_length_px(data.get("font_size", ""))
+        if size is None:
+            size = style["font_size"] if style else 14
+        raw_weight = str(data.get("font_weight", "")).strip().lower()
+        if raw_weight:
+            try:
+                bold = int(raw_weight) >= 600
+            except ValueError:
+                bold = raw_weight in ("bold", "bolder")
+        else:
+            bold = bool(style and style["font_weight"] >= 600)
+        pixel = max(int(round(size * scale)), 1)
+        weight = "bold" if bold else "normal"
+        key = (family, -pixel, weight)
+        font = self._font_cache.get(key)
+        if font is None:
+            font = tkfont.Font(family=family, size=-pixel, weight=weight)
+            self._font_cache[key] = font
+        return font
+
+    def _pseudo_translate(self, tokens, index, base):
+        if index >= len(tokens):
+            return 0.0
+        value, unit = self._pseudo_token(tokens[index])
+        if value is None:
+            return 0.0
+        return value / 100.0 * base if unit == "%" else value
+
+    def _pseudo_transform(self, raw, width, height):
+        tx = ty = angle = 0.0
+        scale = 1.0
+        for name, args in re.findall(
+            r"([A-Za-z]+)\s*\(([^)]*)\)", str(raw)
+        ):
+            name = name.lower()
+            tokens = [part.strip() for part in args.split(",")]
+            if name in ("translate", "translate3d"):
+                tx += self._pseudo_translate(tokens, 0, width)
+                ty += self._pseudo_translate(tokens, 1, height)
+            elif name == "translatex":
+                tx += self._pseudo_translate(tokens, 0, width)
+            elif name == "translatey":
+                ty += self._pseudo_translate(tokens, 0, height)
+            elif name == "rotate":
+                value, unit = self._pseudo_token(
+                    tokens[0] if tokens else ""
+                )
+                if value is not None:
+                    angle += value if unit == "deg" else math.degrees(value)
+            elif name == "scale":
+                value, _unit = self._pseudo_token(
+                    tokens[0] if tokens else ""
+                )
+                if value is not None:
+                    scale *= value
+        return tx, ty, angle, scale
+
+    def _canvas_color(self, value):
+        value = str(value).strip()
+        if not value:
+            return ""
+        try:
+            self.winfo_rgb(value)
+        except tk.TclError:
+            return ""
+        return value
+
+    def _text_block_box(self, layer, box):
+        style = self._layer_text_style(layer)
+        if style is None or style["text_frame"] is not None:
+            return box
+        if self._layer_display(layer) != "block":
+            return box
+        if layer.text_format in ("span", "strong"):
+            return box
+        parent = layer.parent
+        if parent is None:
+            origin = 0.0
+            width = float(self.content_width)
+        else:
+            if self._layer_display(parent) in ("flex", "grid"):
+                return box
+            parent_box = self._layer_css_box(parent)
+            if parent_box is None:
+                parent_box = self._group_css_box(parent)
+            origin = float(parent_box["x"])
+            width = float(parent_box["width"])
+        if style["text_align"] != "left":
+            return (origin, box[1], width, box[3])
+        offset = box[0] - origin
+        if abs(offset) < 0.001:
+            return (origin, box[1], width, box[3])
+        return (
+            origin + offset,
+            box[1],
+            max(width - offset, 1.0),
+            box[3],
+        )
+
+    def _draw_layer_pseudo(self, layer, key, dx=0.0, dy=0.0):
+        data = self._layer_pseudo(layer, key)
+        if not data["enabled"]:
+            return
+        if str(data.get("display", "")).strip() == "none":
+            return
+        box = self._export_visual_box(layer)
+        if box is None and layer.children:
+            css_box = self._group_css_box(layer)
+            box = (
+                css_box["x"],
+                css_box["y"],
+                css_box["width"],
+                css_box["height"],
+            )
+        if box is None:
+            return
+        box = self._text_block_box(layer, box)
+        bx = box[0] + dx
+        by = box[1] + dy
+        bw, bh = box[2], box[3]
+        zoom = self.zoom
+        style = self._pseudo_base_style(layer)
+        rules = self._pseudo_extra_rules(data)
+        font = self._pseudo_font(data, style, zoom)
+        content = self._pseudo_content(data)
+        lines = content.split("\n") if content else []
+        letter_spacing = self._pseudo_length_px(
+            rules.get("letter-spacing", ""), bw
+        )
+        letter_spacing = (letter_spacing or 0.0) * zoom
+        line_height = style["line_height"] if style else 1.2
+        raw_line_height = rules.get("line-height", "").strip()
+        if raw_line_height:
+            value, unit = self._pseudo_token(raw_line_height)
+            if value is not None:
+                if unit == "px":
+                    line_height = value / max(
+                        font.metrics("linespace"), 1
+                    )
+                elif unit == "%":
+                    line_height = value / 100.0
+                else:
+                    line_height = value
+        advance = max(
+            int(round(font.metrics("linespace") * line_height)), 1
+        )
+        widths = []
+        for line in lines:
+            if letter_spacing:
+                total = sum(
+                    font.measure(char) + letter_spacing for char in line
+                )
+                widths.append(max(int(round(total - letter_spacing)), 0))
+            else:
+                widths.append(font.measure(line))
+        content_width = max(widths, default=0) / zoom
+        content_height = (
+            (advance * (len(lines) - 1) + font.metrics("linespace")) / zoom
+            if lines
+            else 0.0
+        )
+        pad_top, pad_right, pad_bottom, pad_left = self._pseudo_sides(
+            data.get("padding", ""), bw
+        )
+        mar_top, _mar_right, _mar_bottom, mar_left = self._pseudo_sides(
+            data.get("margin", ""), bw
+        )
+        explicit_width = self._pseudo_length_px(data.get("width", ""), bw)
+        explicit_height = self._pseudo_length_px(data.get("height", ""), bh)
+        inner_width = (
+            explicit_width if explicit_width is not None else content_width
+        )
+        inner_height = (
+            explicit_height if explicit_height is not None else content_height
+        )
+        border_width = 0.0
+        border_color = ""
+        border_raw = rules.get("border", "").strip()
+        if border_raw:
+            parts = border_raw.split()
+            value, _unit = self._pseudo_token(parts[0])
+            if value is not None:
+                border_width = value
+            for part in reversed(parts[1:]):
+                if part not in (
+                    "solid",
+                    "dashed",
+                    "dotted",
+                    "double",
+                    "groove",
+                    "ridge",
+                    "inset",
+                    "outset",
+                ):
+                    border_color = part
+                    break
+        radius_raw = rules.get("border-radius", "").replace(" ", "")
+        oval = radius_raw in ("50%", "9999px", "100%")
+        align = rules.get("text-align", "").strip().lower()
+        if align not in ("left", "center", "right"):
+            align = style["text_align"] if style else "left"
+        box_width = inner_width + pad_left + pad_right
+        box_height = inner_height + pad_top + pad_bottom
+        left = self._pseudo_length_px(data.get("left", ""), bw)
+        right = self._pseudo_length_px(data.get("right", ""), bw)
+        top = self._pseudo_length_px(data.get("top", ""), bh)
+        bottom = self._pseudo_length_px(data.get("bottom", ""), bh)
+        x1 = bx
+        if left is not None:
+            x1 = bx + left
+        elif right is not None:
+            x1 = bx + bw - right - box_width
+        x1 += mar_left
+        y1 = by
+        if top is not None:
+            y1 = by + top
+        elif bottom is not None:
+            y1 = by + bh - bottom - box_height
+        y1 += mar_top
+        tx, ty, angle, scale = self._pseudo_transform(
+            data.get("transform", ""), box_width, box_height
+        )
+        center_x = x1 + box_width / 2
+        center_y = y1 + box_height / 2
+
+        def point(px, py):
+            px = center_x + (px - center_x) * scale
+            py = center_y + (py - center_y) * scale
+            if angle:
+                radians = math.radians(angle)
+                cos_value = math.cos(radians)
+                sin_value = math.sin(radians)
+                offset_x = px - center_x
+                offset_y = py - center_y
+                px = center_x + offset_x * cos_value - offset_y * sin_value
+                py = center_y + offset_x * sin_value + offset_y * cos_value
+            return (px + tx) * zoom, (py + ty) * zoom
+
+        fill = self._canvas_color(data.get("background", ""))
+        corners = None
+        if box_width > 0 and box_height > 0 and (fill or border_color):
+            corners = [
+                point(x1, y1),
+                point(x1 + box_width, y1),
+                point(x1 + box_width, y1 + box_height),
+                point(x1, y1 + box_height),
+            ]
+        if corners is not None and fill:
+            if oval and not angle and scale == 1:
+                self.doc_canvas.create_oval(
+                    corners[0][0],
+                    corners[0][1],
+                    corners[2][0],
+                    corners[2][1],
+                    fill=fill,
+                    outline="",
+                )
+            else:
+                self.doc_canvas.create_polygon(
+                    [value for corner in corners for value in corner],
+                    fill=fill,
+                    outline="",
+                )
+        border_color = self._canvas_color(border_color)
+        if corners is not None and border_width > 0 and border_color:
+            if oval and not angle and scale == 1:
+                self.doc_canvas.create_oval(
+                    corners[0][0],
+                    corners[0][1],
+                    corners[2][0],
+                    corners[2][1],
+                    fill="",
+                    outline=border_color,
+                    width=max(1, round(border_width * zoom * scale)),
+                )
+            else:
+                self.doc_canvas.create_polygon(
+                    [value for corner in corners for value in corner],
+                    fill="",
+                    outline=border_color,
+                    width=max(1, round(border_width * zoom * scale)),
+                )
+        if not lines:
+            return
+        color = self._canvas_color(data.get("color", ""))
+        if not color:
+            color = style["color"] if style else TEXT
+        draw_font = font if scale == 1 else self._pseudo_font(
+            data, style, zoom * scale
+        )
+        origin_x = x1 + pad_left
+        origin_y = y1 + pad_top
+        line_advance = advance / zoom
+        for index, line in enumerate(lines):
+            line_width = widths[index] / zoom
+            offset = 0.0
+            if align == "center":
+                offset = (inner_width - line_width) / 2
+            elif align == "right":
+                offset = inner_width - line_width
+            base_x = origin_x + offset
+            base_y = origin_y + index * line_advance
+            if angle:
+                screen_x, screen_y = point(base_x, base_y)
+            else:
+                screen_x = (
+                    center_x + (base_x - center_x) * scale + tx
+                ) * zoom
+                screen_y = (
+                    center_y + (base_y - center_y) * scale + ty
+                ) * zoom
+            if letter_spacing and not angle:
+                cursor = screen_x
+                for char in line:
+                    self.doc_canvas.create_text(
+                        cursor,
+                        screen_y,
+                        text=char,
+                        fill=color,
+                        font=draw_font,
+                        anchor="nw",
+                    )
+                    cursor += draw_font.measure(char) + letter_spacing * scale
+            else:
+                options = {
+                    "text": line,
+                    "fill": color,
+                    "font": draw_font,
+                    "anchor": "nw",
+                }
+                if angle:
+                    options["angle"] = -angle
+                self.doc_canvas.create_text(screen_x, screen_y, **options)
 
     def _layer_content_bounds(self, layer):
         records = list(layer.items)
@@ -6584,7 +7452,7 @@ class App(tk.Tk):
         xs = []
         ys = []
 
-        def add_record(record, dx, dy, stretch_width):
+        def add_record(record, dx, dy, stretch_width, layer=None):
             kind = record.get("type")
             if kind in ("rect", "ellipse"):
                 x2 = (
@@ -6628,7 +7496,9 @@ class App(tk.Tk):
                     self._text_metrics(record)
                 )
                 block_width = max(widths, default=0)
-                start = self._text_block_start(record, block_width)
+                start = self._text_block_start(
+                    record, block_width, layer
+                )
                 xs.extend((start + dx, start + block_width + dx))
                 ys.extend((record["y"] + dy, record["y"] + height + dy))
             elif kind == "image":
@@ -6671,7 +7541,7 @@ class App(tk.Tk):
                     xs.extend((bx1 + dx, bx2 + dx))
                     ys.extend((by1 + dy, by2 + dy))
                 for record in item_layer.items:
-                    add_record(record, dx, dy, stretch_width)
+                    add_record(record, dx, dy, stretch_width, item_layer)
                 offsets = {}
                 display = self._layer_display(item_layer)
                 if item_layer.children and display == "flex":
@@ -6811,7 +7681,9 @@ class App(tk.Tk):
                 layer, dx, dy, stretch_width, parts
             )
             for record in layer.items:
-                markup = self._svg_record(record, dx, dy, stretch_width)
+                markup = self._svg_record(
+                    record, dx, dy, stretch_width, layer
+                )
                 if markup:
                     parts.append(markup)
             offsets = {}
@@ -6869,7 +7741,9 @@ class App(tk.Tk):
             f'href="{href}" preserveAspectRatio="{fit}"/>'
         )
 
-    def _svg_record(self, record, dx=0.0, dy=0.0, stretch_width=None):
+    def _svg_record(
+        self, record, dx=0.0, dy=0.0, stretch_width=None, layer=None
+    ):
         kind = record.get("type")
         if kind in ("rect", "ellipse"):
             x1 = float(record["x1"]) + dx
@@ -6933,12 +7807,12 @@ class App(tk.Tk):
                 f'r="{self._css_num(radius)}" fill="{color}"/>'
             )
         if kind == "text":
-            return self._svg_text(record, dx, dy)
+            return self._svg_text(record, dx, dy, layer)
         if kind == "image":
             return self._svg_image(record, dx, dy, stretch_width)
         return ""
 
-    def _svg_text(self, record, dx=0.0, dy=0.0):
+    def _svg_text(self, record, dx=0.0, dy=0.0, layer=None):
         font, lines, widths, advance, letter_spacing, _height = (
             self._text_metrics(record)
         )
@@ -6956,7 +7830,7 @@ class App(tk.Tk):
         weight = self._text_weight_value(record)
         align = self._text_align(record)
         block_width = max(widths, default=0)
-        start = self._text_block_start(record, block_width)
+        start = self._text_block_start(record, block_width, layer)
         ascent = font.metrics("ascent")
         attributes = (
             f'font-family="{html.escape(str(family), quote=True)}" '
@@ -7509,7 +8383,11 @@ class App(tk.Tk):
                         if text_format in ("span", "strong")
                         else self._text_tag(record)
                     )
-                    if class_name == tag and not text_format:
+                    if (
+                        class_name == tag
+                        and not text_format
+                        and not self._layer_has_pseudo(layer)
+                    ):
                         lines.append(f"{indent}<{tag}>{content}</{tag}>")
                     else:
                         lines.append(
@@ -7803,7 +8681,8 @@ class App(tk.Tk):
                 frame = text_style["text_frame"]
                 tag = text_style["tag"]
                 inline = layer.text_format in ("span", "strong")
-                bare = class_name == tag and not inline
+                has_pseudo = self._layer_has_pseudo(layer)
+                bare = class_name == tag and not inline and not has_pseudo
                 selector = tag if bare else f".{class_name}"
                 lines.append(f"{selector} {{")
                 bottom = (
@@ -7863,11 +8742,33 @@ class App(tk.Tk):
                         horizontal,
                         "margin-left" in resets,
                     )
+                display = self._layer_display(layer)
                 if frame is not None and not inline:
                     lines.append(
                         "  width: "
                         f"{self._css_num(frame[2] - frame[0])}px;"
                     )
+                elif (
+                    display == "block"
+                    and not inline
+                    and (
+                        layer.parent is None
+                        or self._layer_display(layer.parent)
+                        not in ("flex", "grid")
+                    )
+                ):
+                    if horizontal is None:
+                        lines.append("  width: 100%;")
+                    elif horizontal > 0:
+                        lines.append(
+                            "  width: calc(100% - "
+                            f"{self._css_num(horizontal)}px);"
+                        )
+                    else:
+                        lines.append(
+                            "  width: calc(100% + "
+                            f"{self._css_num(-horizontal)}px);"
+                        )
                 lines.append(f"  color: {text_style['color']};")
                 if text_style["font_family"] != "none":
                     lines.append(
@@ -7899,9 +8800,10 @@ class App(tk.Tk):
                         "  text-align: "
                         f"{text_style['text_align']};"
                     )
-                display = self._layer_display(layer)
                 if display != "block" and not inline:
                     lines.append(f"  display: {display};")
+                if has_pseudo:
+                    lines.append("  position: relative;")
                 if layer.blend_mode != "normal":
                     lines.append(
                         f"  mix-blend-mode: {layer.blend_mode};"
@@ -8001,6 +8903,7 @@ class App(tk.Tk):
                     self._append_group_align(lines, layer)
                     self._append_group_inline_typography(lines, layer)
                     lines.append("}")
+            self._append_pseudo_css(lines, layer, class_name)
             self._collect_css_rules(
                 layer.children,
                 lines,
@@ -8016,6 +8919,89 @@ class App(tk.Tk):
             lines.append(f"  {prop}: {self._css_num(value)}px;")
         elif reset:
             lines.append(f"  {prop}: 0;")
+
+    def _append_pseudo_css(self, lines, layer, class_name):
+        for pseudo in PSEUDO_KEYS:
+            data = self._layer_pseudo(layer, pseudo)
+            if not data["enabled"]:
+                continue
+            declarations = self._pseudo_declarations(data)
+            if lines:
+                lines.append("")
+            lines.append(f".{class_name}::{pseudo} {{")
+            for declaration in declarations:
+                lines.append(f"  {declaration}")
+            lines.append("}")
+
+    def _pseudo_declarations(self, data):
+        declarations = []
+        content = str(data.get("content", "")).strip()
+        if (
+            len(content) >= 2
+            and content[0] == content[-1]
+            and content[0] in "\"'"
+        ):
+            content = content[1:-1]
+        content = (
+            content.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r\n", "\\A ")
+            .replace("\n", "\\A ")
+            .replace("\r", "\\A ")
+        )
+        declarations.append(f'content: "{content}";')
+        position = str(data.get("position", "absolute")).strip()
+        if position not in PSEUDO_POSITIONS:
+            position = "absolute"
+        declarations.append(f"position: {position};")
+        for prop in ("top", "left", "bottom", "right"):
+            value = self._pseudo_length(data.get(prop, ""))
+            if value:
+                declarations.append(f"{prop}: {value};")
+        transform = str(data.get("transform", "")).strip().rstrip(";")
+        if transform:
+            declarations.append(f"transform: {transform};")
+        display = str(data.get("display", "")).strip()
+        if display in PSEUDO_DISPLAYS and display:
+            declarations.append(f"display: {display};")
+        for prop, key in (
+            ("width", "width"),
+            ("height", "height"),
+            ("margin", "margin"),
+            ("padding", "padding"),
+            ("font-size", "font_size"),
+        ):
+            value = self._pseudo_length(data.get(key, ""))
+            if value:
+                declarations.append(f"{prop}: {value};")
+        color = str(data.get("color", "")).strip()
+        if color:
+            declarations.append(f"color: {color};")
+        background = str(data.get("background", "")).strip()
+        if background:
+            declarations.append(f"background: {background};")
+        weight = str(data.get("font_weight", "")).strip()
+        if weight:
+            declarations.append(f"font-weight: {weight};")
+        for line in str(data.get("extra", "")).splitlines():
+            line = line.strip().rstrip(";")
+            if line and "{" not in line and "}" not in line:
+                declarations.append(f"{line};")
+        return declarations
+
+    def _pseudo_length(self, raw):
+        value = str(raw).strip()
+        if not value:
+            return ""
+        parts = []
+        for token in value.split():
+            try:
+                number = float(token)
+            except ValueError:
+                parts.append(token)
+            else:
+                parts.append(f"{self._css_num(number)}px")
+        return " ".join(parts)
 
     def _append_group_gap(self, lines, layer):
         if self._layer_display(layer) not in ("flex", "grid"):
