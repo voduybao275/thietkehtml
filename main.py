@@ -1,9 +1,11 @@
 import base64
+import ctypes
 import html
 import json
 import math
 import os
 import re
+import sys
 import tkinter as tk
 from collections import Counter
 from io import BytesIO
@@ -387,12 +389,27 @@ class Tooltip:
             self.tip = None
 
 
+def _set_app_user_model_id():
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "VoDuyBao.ThietKeHTML"
+        )
+    except (AttributeError, OSError):
+        pass
+
+
 class App(tk.Tk):
     def __init__(self):
+        _set_app_user_model_id()
         super().__init__()
         self.title("Giao diện toàn màn hình")
         self.configure(bg=BG)
         self.minsize(*MIN_SIZE)
+        self._favicon_photo = None
+        self._window_icons = []
+        self._apply_window_icon()
         self.is_fullscreen = False
         self.tool_items = {}
         self.tool_tips = {}
@@ -466,6 +483,75 @@ class App(tk.Tk):
         self.withdraw()
         self.after(50, self.start_maximized)
 
+    def _favicon_path(self):
+        candidates = []
+        bundled = getattr(sys, "_MEIPASS", None)
+        if bundled:
+            candidates.append(os.path.join(bundled, "favicon.ico"))
+        candidates.append(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "favicon.ico"
+            )
+        )
+        if getattr(sys, "frozen", False):
+            candidates.append(
+                os.path.join(
+                    os.path.dirname(os.path.abspath(sys.executable)),
+                    "favicon.ico",
+                )
+            )
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _favicon_photo_at(self, path, size):
+        if Image is None:
+            return None
+        try:
+            with Image.open(path) as icon:
+                icon.load()
+                image = icon.convert("RGBA")
+        except (OSError, ValueError):
+            return None
+        if image.size != (size, size):
+            image = image.resize((size, size), Image.LANCZOS)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return tk.PhotoImage(
+            master=self,
+            data=base64.b64encode(buffer.getvalue()).decode("ascii"),
+        )
+
+    def _apply_window_icon(self):
+        path = self._favicon_path()
+        if path is None:
+            return
+        self._favicon_file = path
+        self._favicon_photo = self._favicon_photo_at(path, 26)
+        try:
+            self.iconbitmap(default=path)
+            return
+        except tk.TclError:
+            pass
+        photo = self._favicon_photo_at(path, 32)
+        if photo is None:
+            return
+        try:
+            self.iconphoto(True, photo)
+        except tk.TclError:
+            return
+        self._window_icons = [photo]
+
+    def _install_window_icon(self):
+        path = getattr(self, "_favicon_file", None)
+        if not path:
+            return
+        try:
+            self.iconbitmap(path)
+        except tk.TclError:
+            pass
+
     def _build_fonts(self):
         self.font_brand = tkfont.Font(family="Segoe UI", size=14, weight="bold")
         self.font_menu = tkfont.Font(family="Segoe UI", size=9, weight="bold")
@@ -508,15 +594,25 @@ class App(tk.Tk):
         brand = tk.Frame(header, bg=PANEL_BG)
         brand.grid(row=0, column=0, sticky="w", padx=(20, 0), pady=10)
 
-        tk.Label(
-            brand,
-            text="T",
-            font=self.font_menu,
-            fg=TEXT,
-            bg=ACCENT,
-            width=3,
-            pady=4,
-        ).pack(side="left")
+        if self._favicon_photo is not None:
+            tk.Label(
+                brand,
+                image=self._favicon_photo,
+                bg=PANEL_BG,
+                bd=0,
+                padx=0,
+                pady=0,
+            ).pack(side="left")
+        else:
+            tk.Label(
+                brand,
+                text="T",
+                font=self.font_menu,
+                fg=TEXT,
+                bg=ACCENT,
+                width=3,
+                pady=4,
+            ).pack(side="left")
 
         tk.Label(
             brand,
@@ -9646,6 +9742,7 @@ class App(tk.Tk):
     def start_maximized(self):
         self.state("zoomed")
         self.deiconify()
+        self._install_window_icon()
         self.is_fullscreen = False
         self.btn_fullscreen.configure(text="Toàn màn hình")
         self.lift()
