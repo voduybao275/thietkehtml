@@ -241,17 +241,21 @@ CURSORS = {
     "text": "xterm",
 }
 
-TEXT_TAGS = ("p", "h1", "h2", "h3", "h4", "h5", "h6")
+TEXT_TAGS = ("p", "h1", "h2", "h3", "h4", "h5", "h6", "a")
 
 TEXT_FORMATS = ("text", "span", "strong")
 
-GROUP_FORMATS = ("text", "h1", "h2", "h3", "h4", "h5", "h6")
+GROUP_FORMATS = ("text", "h1", "h2", "h3", "h4", "h5", "h6", "a")
 
 GROUP_DISPLAYS = ("block", "flex", "grid","inline")
 
 GROUP_ALIGNS = ("left", "center", "right")
 
 GROUP_JUSTIFIES = ("left", "center", "right", "between")
+
+GROUP_ALIGN_ITEMS = ("start", "center", "end")
+
+LAYER_ORDERS = (-1, 0, 1, 2, 3, 4, 5)
 
 PSEUDO_KEYS = ("before", "after")
 
@@ -292,6 +296,9 @@ SHORTCUTS = [
     ("Ctrl + J", "Nhân bản lớp"),
     ("Ctrl + G", "Nhóm các lớp đang chọn"),
     ("Ctrl + ;", "Ẩn/hiện đường gióng"),
+    ("M", "Chọn công cụ Di chuyển"),
+    ("S", "Chọn công cụ Chọn vùng"),
+    ("C", "Chọn công cụ Cắt ảnh"),
     ("Ctrl + lăn chuột", "Thu phóng khung nội dung"),
     ("F11", "Bật/tắt toàn màn hình"),
     ("Esc", "Thoát toàn màn hình"),
@@ -310,6 +317,8 @@ class Layer:
         self.display = "block"
         self.align = "left"
         self.justify = "left"
+        self.align_items = "start"
+        self.order = 0
         self.gap = 0
         self.blend_mode = "normal"
         self.text_format = ""
@@ -622,7 +631,9 @@ class App(tk.Tk):
         if tool_id == "rect":
             item.bind("<Button-3>", self._open_rect_shape_menu)
 
-        self.tool_tips[tool_id] = Tooltip(item, name)
+        tool_key = {"move": "M", "marquee": "S", "crop": "C"}.get(tool_id)
+        tip_name = f"{name} ({tool_key})" if tool_key else name
+        self.tool_tips[tool_id] = Tooltip(item, tip_name)
         self.tool_items[tool_id] = (item, backdrop)
 
     def _build_workspace(self):
@@ -1967,6 +1978,21 @@ class App(tk.Tk):
         label.grid_remove()
         gap_holder.grid_remove()
 
+        label = self._info_label(body, 12, "Align items")
+        align_items_holder = tk.Frame(body, bg=PANEL_BG)
+        align_items_holder.grid(row=12, column=1, sticky="e", pady=2)
+        self.info_group_align_items_rows = (label, align_items_holder)
+        self.info_group_align_items_var = tk.StringVar(value="start")
+        self.info_group_align_items_menu = self._make_info_menu(
+            align_items_holder,
+            self.info_group_align_items_var,
+            GROUP_ALIGN_ITEMS,
+            self._apply_group_align_items,
+        )
+        self.info_group_align_items_menu.pack(side="left")
+        label.grid_remove()
+        align_items_holder.grid_remove()
+
         for entry in (self.info_width_entry, self.info_height_entry):
             entry.bind("<Return>", self._apply_rect_size)
             entry.bind("<FocusOut>", self._apply_rect_size)
@@ -2524,6 +2550,50 @@ class App(tk.Tk):
         self._push_history()
         layer.justify = value
         self._render_document()
+        self._refresh_info()
+        self._refresh_doc_tab()
+
+    def _layer_align_items(self, layer):
+        value = getattr(layer, "align_items", "start")
+        return value if value in GROUP_ALIGN_ITEMS else "start"
+
+    def _layer_order(self, layer):
+        value = getattr(layer, "order", 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return value if value in LAYER_ORDERS else 0
+
+    def _set_layer_order(self, layer, value):
+        if layer is None or value not in LAYER_ORDERS:
+            return
+        current = self._layer_order(layer)
+        new_value = 0 if current == value else value
+        if new_value == current:
+            return
+        self._push_history()
+        layer.order = new_value
+        if new_value:
+            siblings = layer.parent.children if layer.parent else self.layers
+            for sibling in siblings:
+                if sibling is not layer:
+                    sibling.order = 0
+        self._render_document()
+        self._refresh_info()
+        self._refresh_doc_tab()
+
+    def _apply_group_align_items(self, value):
+        layer = self.active_layer
+        if layer is None or not layer.children:
+            return
+        if (
+            value not in GROUP_ALIGN_ITEMS
+            or self._layer_align_items(layer) == value
+        ):
+            return
+        self._push_history()
+        layer.align_items = value
+        self._render_document()
+        self._refresh_info()
         self._refresh_doc_tab()
 
     def _apply_group_gap(self, _event=None):
@@ -2546,6 +2616,7 @@ class App(tk.Tk):
         self._push_history()
         layer.gap = value
         self._render_document()
+        self._refresh_info()
         self._refresh_doc_tab()
 
     def _layer_box_defaults(self):
@@ -2633,6 +2704,11 @@ class App(tk.Tk):
                     widget.grid()
                 else:
                     widget.grid_remove()
+            for widget in self.info_group_align_items_rows:
+                if flex_group:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
             if show_display:
                 self.info_group_display_var.set(
                     self._layer_display(self.active_layer)
@@ -2643,6 +2719,9 @@ class App(tk.Tk):
                 )
                 self.info_group_justify_var.set(
                     self._layer_justify(self.active_layer)
+                )
+                self.info_group_align_items_var.set(
+                    self._layer_align_items(self.active_layer)
                 )
                 self._set_info_entry(
                     self.info_group_gap_entry,
@@ -2861,7 +2940,7 @@ class App(tk.Tk):
                 for child in item_layer.children:
                     if not child.visible:
                         continue
-                    child_dx, child_dy, _stretch = child_offsets.get(
+                    child_dx, child_dy, child_stretch = child_offsets.get(
                         id(child), (0.0, 0.0, None)
                     )
                     keep_design = (
@@ -2869,12 +2948,21 @@ class App(tk.Tk):
                         and child.children
                         and self._is_flex_fill_layer(child)
                     )
+                    child_children_dx = None
+                    child_children_dy = None
+                    if keep_design:
+                        child_children_dx = self._flex_fill_children_dx(
+                            child, base_dx + child_dx, child_stretch
+                        )
+                        if child_children_dx is None:
+                            child_children_dx = base_dx
+                        child_children_dy = base_dy
                     walk(
                         [child],
                         base_dx + child_dx,
                         base_dy + child_dy,
-                        children_dx=base_dx if keep_design else None,
-                        children_dy=base_dy if keep_design else None,
+                        children_dx=child_children_dx,
+                        children_dy=child_children_dy,
                     )
 
         walk(self.layers)
@@ -3497,6 +3585,22 @@ class App(tk.Tk):
         self.doc_canvas.configure(cursor=CURSORS.get(tool_id, "arrow"))
         self._update_status()
 
+    def _shortcut_tool(self, tool_id):
+        widget = self.focus_get()
+        if widget is not None and widget.winfo_class() in (
+            "Entry",
+            "TEntry",
+            "Text",
+            "Spinbox",
+            "TSpinbox",
+            "TCombobox",
+            "Combobox",
+            "TListbox",
+            "Listbox",
+        ):
+            return
+        self.select_tool(tool_id)
+
     def _open_rect_shape_menu(self, event):
         menu = tk.Menu(
             self,
@@ -3645,6 +3749,8 @@ class App(tk.Tk):
         clone.display = self._layer_display(layer)
         clone.align = self._layer_align(layer)
         clone.justify = self._layer_justify(layer)
+        clone.align_items = self._layer_align_items(layer)
+        clone.order = self._layer_order(layer)
         clone.gap = self._layer_gap(layer)
         clone.blend_mode = layer.blend_mode
         clone.text_format = layer.text_format
@@ -3868,6 +3974,8 @@ class App(tk.Tk):
             "display": self._layer_display(layer),
             "align": self._layer_align(layer),
             "justify": self._layer_justify(layer),
+            "align_items": self._layer_align_items(layer),
+            "order": self._layer_order(layer),
             "gap": self._layer_gap(layer),
             "blend_mode": layer.blend_mode,
             "text_format": layer.text_format,
@@ -3895,6 +4003,18 @@ class App(tk.Tk):
             justify = item.get("justify", "left")
             layer.justify = (
                 justify if justify in GROUP_JUSTIFIES else "left"
+            )
+            align_items = item.get("align_items", "start")
+            layer.align_items = (
+                align_items if align_items in GROUP_ALIGN_ITEMS else "start"
+            )
+            order = item.get("order", 0)
+            layer.order = (
+                order
+                if isinstance(order, int)
+                and not isinstance(order, bool)
+                and order in LAYER_ORDERS
+                else 0
             )
             gap = item.get("gap", 0)
             layer.gap = (
@@ -3967,6 +4087,8 @@ class App(tk.Tk):
             "display": self._layer_display(layer),
             "align": self._layer_align(layer),
             "justify": self._layer_justify(layer),
+            "align_items": self._layer_align_items(layer),
+            "order": self._layer_order(layer),
             "gap": self._layer_gap(layer),
             "blend_mode": layer.blend_mode,
             "text_format": layer.text_format,
@@ -4195,6 +4317,33 @@ class App(tk.Tk):
         parent.add_cascade(label="Định dạng", menu=format_menu)
         return format_menu
 
+    def _add_order_menu(self, parent, layer):
+        order_menu = tk.Menu(
+            parent,
+            tearoff=0,
+            bg=PANEL_BG,
+            fg=TEXT,
+            activebackground=ACCENT,
+            activeforeground=TEXT,
+            selectcolor=ACCENT,
+            bd=0,
+        )
+        current = self._layer_order(layer)
+        variables = []
+        for value in LAYER_ORDERS:
+            variable = tk.BooleanVar(value=current == value)
+            variables.append(variable)
+            order_menu.add_checkbutton(
+                label=str(value),
+                variable=variable,
+                command=lambda v=value, target=layer: self._set_layer_order(
+                    target, v
+                ),
+            )
+        order_menu._check_vars = variables
+        parent.add_cascade(label="Order", menu=order_menu)
+        return order_menu
+
     def _on_layer_context(self, event, layer):
         if layer not in self.selected_layers:
             self._select_layer(layer)
@@ -4247,6 +4396,7 @@ class App(tk.Tk):
                     ("h4", "H4"),
                     ("h5", "H5"),
                     ("h6", "H6"),
+                    ("a", "A"),
                 ),
                 layer.group_tag,
                 self._set_group_format,
@@ -4264,6 +4414,8 @@ class App(tk.Tk):
                 layer.text_format,
                 self._set_text_format,
             )
+        menu.add_separator()
+        self._add_order_menu(menu, layer)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -5646,7 +5798,7 @@ class App(tk.Tk):
         except (TypeError, ValueError):
             return 0.0
 
-    def _text_metrics(self, record):
+    def _text_metrics(self, record, wrap_width=None):
         font = self._text_font(record)
         line_height = self._text_line_height(record)
         letter_spacing = self._text_letter_spacing(record)
@@ -5654,6 +5806,15 @@ class App(tk.Tk):
             int(round(font.metrics("linespace") * line_height)), 1
         )
         lines = self._text_display_text(record).split("\n")
+        if wrap_width is not None:
+            wrapped = []
+            for line in lines:
+                wrapped.extend(
+                    self._wrap_text_line(
+                        font, line, wrap_width, letter_spacing
+                    )
+                )
+            lines = wrapped
         widths = []
         for line in lines:
             if letter_spacing:
@@ -5667,9 +5828,82 @@ class App(tk.Tk):
         height = advance * (len(lines) - 1) + font.metrics("linespace")
         return font, lines, widths, advance, letter_spacing, height
 
+    def _wrap_text_line(self, font, line, max_width, letter_spacing):
+        def measure(text):
+            if not text:
+                return 0
+            if letter_spacing:
+                total = (
+                    sum(font.measure(char) + letter_spacing for char in text)
+                    - letter_spacing
+                )
+                return int(round(total))
+            return font.measure(text)
+
+        if measure(line) <= max_width:
+            return [line]
+        wrapped = []
+        current = ""
+        for word in line.split(" "):
+            candidate = word if not current else f"{current} {word}"
+            if measure(candidate) <= max_width:
+                current = candidate
+                continue
+            if current:
+                wrapped.append(current)
+                current = ""
+            while word and measure(word) > max_width:
+                cut = 1
+                for index in range(1, len(word) + 1):
+                    if measure(word[:index]) > max_width:
+                        break
+                    cut = index
+                wrapped.append(word[:cut])
+                word = word[cut:]
+            current = word
+        if current:
+            wrapped.append(current)
+        return wrapped or [line]
+
+    def _text_wrap_width(self, record, layer):
+        if layer is None:
+            return None
+        parent = layer.parent
+        if parent is not None and self._layer_display(parent) in (
+            "flex",
+            "grid",
+        ):
+            return None
+        frame = self._text_frame(record)
+        if frame is not None:
+            return max(frame[2] - frame[0], 1.0)
+        x1, x2 = self._text_wrap_frame(layer)
+        if self._text_align(record) == "left":
+            width = x2 - record["x"]
+            return width if width > 0 else None
+        return max(x2 - x1, 1.0)
+
+    def _text_wrap_frame(self, layer):
+        group = layer.parent
+        while group is not None:
+            shapes = [
+                record
+                for record in group.items
+                if record.get("type") in ("rect", "ellipse")
+            ]
+            if shapes:
+                shape = max(
+                    shapes,
+                    key=lambda record: record["x2"] - record["x1"],
+                )
+                if shape["x2"] - shape["x1"] > 1:
+                    return (shape["x1"], shape["x2"])
+            group = group.parent
+        return (0.0, float(self.content_width))
+
     def _draw_text_record(self, record, dx=0.0, dy=0.0, layer=None):
         font, lines, widths, advance, letter_spacing, height = (
-            self._text_metrics(record)
+            self._text_metrics(record, self._text_wrap_width(record, layer))
         )
         y = record["y"] + dy
         block_width = max(widths, default=0)
@@ -5842,13 +6076,22 @@ class App(tk.Tk):
                     and child.children
                     and self._is_flex_fill_layer(child)
                 )
+                child_children_dx = None
+                child_children_dy = None
+                if keep_design:
+                    child_children_dx = self._flex_fill_children_dx(
+                        child, base_dx + child_dx, child_stretch
+                    )
+                    if child_children_dx is None:
+                        child_children_dx = base_dx
+                    child_children_dy = base_dy
                 self._draw_layers(
                     [child],
                     base_dx + child_dx,
                     base_dy + child_dy,
                     child_stretch,
-                    children_dx=base_dx if keep_design else None,
-                    children_dy=base_dy if keep_design else None,
+                    children_dx=child_children_dx,
+                    children_dy=child_children_dy,
                 )
             self._draw_layer_pseudo(layer, "after", dx, dy)
 
@@ -5877,6 +6120,18 @@ class App(tk.Tk):
             box["x"] + box["width"], box["y"] + box["height"],
         )
 
+    def _flex_fill_children_dx(self, layer, offset, stretch):
+        if not stretch:
+            return None
+        bound = self._flex_child_bounds(layer)
+        content = self._descendant_content_bounds(layer)
+        if bound is None or content is None:
+            return None
+        frame_left = bound[0] + offset
+        if content[0] >= frame_left and content[2] <= frame_left + stretch:
+            return None
+        return frame_left - content[0]
+
     def _flex_child_offsets(self, layer):
         box = self._layer_css_box(layer)
         if box is None:
@@ -5884,19 +6139,59 @@ class App(tk.Tk):
         children = [child for child in layer.children if child.visible]
         if not children:
             return {}
+        dom_index = {id(child): index for index, child in enumerate(children)}
+        if any(self._layer_order(child) for child in children):
+            children.sort(
+                key=lambda child: (
+                    self._layer_order(child),
+                    dom_index[id(child)],
+                )
+            )
         bounds = [self._flex_child_bounds(child) for child in children]
         widths = [
             max(bound[2] - bound[0], 0) if bound else 0
             for bound in bounds
         ]
         justify = self._layer_justify(layer)
+        align_items = self._layer_align_items(layer)
         gap = self._layer_gap(layer)
+        first_bound = next(
+            (bound for bound in bounds if bound is not None), None
+        )
+        padding = (
+            max(first_bound[1] - box["y"], 0.0)
+            if first_bound is not None and box is not None
+            else 0.0
+        )
+        line_top = box["y"] + padding if box is not None else 0.0
+        line_height = box["height"] if box is not None else max(
+            (
+                bound[3] - bound[1]
+                for bound in bounds
+                if bound is not None
+            ),
+            default=0.0,
+        )
+
+        def align_dy(bound):
+            if align_items == "start" or bound is None:
+                return 0.0
+            delta = max(line_height - (bound[3] - bound[1]), 0.0)
+            if align_items == "center":
+                delta /= 2
+            return line_top + delta - bound[1]
+
         fills = [self._is_flex_fill_layer(child) for child in children]
         count = len(children)
         if any(fills):
             margins = []
             for index, bound in enumerate(bounds):
-                if justify != "left" or index == 1 or bound is None:
+                child = children[index]
+                if (
+                    justify != "left"
+                    or dom_index[id(child)] == 1
+                    or bound is None
+                ):
                     margins.append(0.0)
                 else:
                     margins.append(bound[0] - box["x"])
@@ -5915,7 +6210,7 @@ class App(tk.Tk):
                 if bound is not None:
                     offsets[id(child)] = (
                         start - bound[0],
-                        0.0,
+                        align_dy(bound),
                         share if fill else None,
                     )
                 cursor = start + draw_width + gap
@@ -5923,15 +6218,15 @@ class App(tk.Tk):
         offsets = {}
         if justify == "left":
             cursor = box["x"]
-            for index, (child, bound, width) in enumerate(
-                zip(children, bounds, widths)
-            ):
+            for child, bound, width in zip(children, bounds, widths):
                 left = 0.0
-                if index != 1 and bound is not None:
+                if dom_index[id(child)] != 1 and bound is not None:
                     left = bound[0] - box["x"]
                 start = cursor + left
                 if bound is not None:
-                    offsets[id(child)] = (start - bound[0], 0.0, None)
+                    offsets[id(child)] = (
+                        start - bound[0], align_dy(bound), None
+                    )
                 cursor = start + width + gap
             return offsets
         total = sum(widths) + gap * (count - 1)
@@ -5948,7 +6243,7 @@ class App(tk.Tk):
             cursor = box["x"]
         for child, bound, width in zip(children, bounds, widths):
             if bound is not None:
-                offsets[id(child)] = (cursor - bound[0], 0.0, None)
+                offsets[id(child)] = (cursor - bound[0], align_dy(bound), None)
             cursor += width + step
         return offsets
 
@@ -5958,9 +6253,16 @@ class App(tk.Tk):
             return {}
         offsets = {}
         row = 0
-        for child in layer.children:
-            if not child.visible:
-                continue
+        children = [child for child in layer.children if child.visible]
+        dom_index = {id(child): index for index, child in enumerate(children)}
+        if any(self._layer_order(child) for child in children):
+            children.sort(
+                key=lambda child: (
+                    self._layer_order(child),
+                    dom_index[id(child)],
+                )
+            )
+        for child in children:
             offsets[id(child)] = (0.0, gap * row, None)
             row += 1
         return offsets
@@ -6133,9 +6435,15 @@ class App(tk.Tk):
         style = self._layer_text_style(layer)
         if style is None or style["text_frame"] is not None:
             return box
-        if self._layer_display(layer) != "block":
-            return box
-        if layer.text_format in ("span", "strong"):
+        display = self._layer_display(layer)
+        if display == "inline" and style["text_align"] != "left":
+            record = [
+                item for item in layer.items if item.get("type") == "text"
+            ][-1]
+            width = style["width"]
+            start = self._text_block_start(record, width, layer)
+            return (start, box[1], width, box[3])
+        if display != "block" or layer.text_format in ("span", "strong"):
             return box
         parent = layer.parent
         if parent is None:
@@ -6398,29 +6706,48 @@ class App(tk.Tk):
 
     def _layer_content_bounds(self, layer):
         records = list(layer.items)
+        owners = [layer] * len(records)
 
         def collect(item_layer):
             for child in item_layer.children:
                 if not child.visible:
                     continue
                 records.extend(child.items)
+                owners.extend([child] * len(child.items))
                 collect(child)
 
         collect(layer)
-        return self._record_bounds(records)
+        return self._record_bounds(records, owners)
+
+    def _descendant_content_bounds(self, layer):
+        records = []
+        owners = []
+
+        def collect(item_layer):
+            for child in item_layer.children:
+                if not child.visible:
+                    continue
+                records.extend(child.items)
+                owners.extend([child] * len(child.items))
+                collect(child)
+
+        collect(layer)
+        return self._record_bounds(records, owners)
 
     def _layer_background_bounds(self, layer):
         records = list(layer.items)
+        owners = [layer] * len(records)
 
         def collect(item_layer):
             for child in item_layer.children:
                 if not child.visible:
                     continue
                 records.extend(child.items)
+                owners.extend([child] * len(child.items))
                 collect(child)
 
         collect(layer)
-        bounds = self._record_bounds(records)
+        bounds = self._record_bounds(records, owners)
         if bounds is None:
             return (0, 0, self.content_width, self.content_height)
         x1, y1, x2, y2 = bounds
@@ -7493,7 +7820,9 @@ class App(tk.Tk):
                 )
             elif kind == "text":
                 _font, _lines, widths, _advance, _spacing, height = (
-                    self._text_metrics(record)
+                    self._text_metrics(
+                        record, self._text_wrap_width(record, layer)
+                    )
                 )
                 block_width = max(widths, default=0)
                 start = self._text_block_start(
@@ -7814,7 +8143,7 @@ class App(tk.Tk):
 
     def _svg_text(self, record, dx=0.0, dy=0.0, layer=None):
         font, lines, widths, advance, letter_spacing, _height = (
-            self._text_metrics(record)
+            self._text_metrics(record, self._text_wrap_width(record, layer))
         )
         family = self._text_family(record)
         if family == "none":
@@ -8190,7 +8519,7 @@ class App(tk.Tk):
         parts = [page_css]
         if self._has_visible_text(self.layers):
             parts.append(
-                "p, h1, h2, h3, h4, h5, h6 {\n  margin: 0;\n}"
+                "p, h1, h2, h3, h4, h5, h6, a {\n  margin: 0;\n}"
             )
         if css:
             parts.append(css)
@@ -8315,7 +8644,7 @@ class App(tk.Tk):
         return result
 
     def _group_inline_mode(self, layer):
-        if not layer.group_tag:
+        if not layer.group_tag or layer.group_tag == "a":
             return False
         return bool(self._group_direct_text_layers(layer))
 
@@ -8364,9 +8693,13 @@ class App(tk.Tk):
                         f"{content}</{tag}>"
                     )
                 else:
-                    lines.append(f'{indent}<div class="{class_name}">')
+                    tag = "a" if layer.group_tag == "a" else "div"
+                    href = ' href="#"' if tag == "a" else ""
+                    lines.append(
+                        f'{indent}<{tag} class="{class_name}"{href}>'
+                    )
                     self._collect_html_layers(layer.children, lines, depth + 1)
-                    lines.append(f"{indent}</div>")
+                    lines.append(f"{indent}</{tag}>")
             elif self._layer_text_style(layer) is not None:
                 for record in layer.items:
                     if record.get("type") != "text":
@@ -8383,15 +8716,18 @@ class App(tk.Tk):
                         if text_format in ("span", "strong")
                         else self._text_tag(record)
                     )
+                    href = ' href="#"' if tag == "a" else ""
                     if (
                         class_name == tag
                         and not text_format
                         and not self._layer_has_pseudo(layer)
                     ):
-                        lines.append(f"{indent}<{tag}>{content}</{tag}>")
+                        lines.append(
+                            f"{indent}<{tag}{href}>{content}</{tag}>"
+                        )
                     else:
                         lines.append(
-                            f'{indent}<{tag} class="{class_name}">'
+                            f'{indent}<{tag} class="{class_name}"{href}>'
                             f"{content}</{tag}>"
                         )
             elif self._is_image_layer(layer):
@@ -8422,7 +8758,7 @@ class App(tk.Tk):
             return None
         record = texts[-1]
         _font, _lines, widths, _advance, _spacing, height = (
-            self._text_metrics(record)
+            self._text_metrics(record, self._text_wrap_width(record, layer))
         )
         frame = self._text_frame(record)
         if frame is not None:
@@ -8526,6 +8862,12 @@ class App(tk.Tk):
                         offset = child_offsets.get(id(layer))
                         if offset and self._is_flex_fill_layer(layer):
                             child_x = x1 + offset[0]
+                            content = self._descendant_content_bounds(layer)
+                            if content is not None and not (
+                                content[0] >= child_x
+                                and content[2] <= child_x + (offset[2] or 0)
+                            ):
+                                child_x = content[0]
                         child_flow, child_padding = walk(
                             layer.children, child_x, y1, layer
                         )
@@ -8549,12 +8891,15 @@ class App(tk.Tk):
             padding = 0
             if items:
                 first = items[0]["layer"]
-                position = self._layer_position(first)
-                padding = (
-                    max(position[1], 0)
-                    if position is not None
-                    else max(items[0]["y"] - origin_y, 0)
-                )
+                if parent is not None and self._layer_display(parent) == "flex":
+                    padding = max(items[0]["y"] - origin_y, 0)
+                else:
+                    position = self._layer_position(first)
+                    padding = (
+                        max(position[1], 0)
+                        if position is not None
+                        else max(items[0]["y"] - origin_y, 0)
+                    )
             for index, item in enumerate(items):
                 entry = flow.setdefault(id(item["layer"]), {})
                 entry["left"] = item["x"] - origin_x
@@ -8653,6 +8998,7 @@ class App(tk.Tk):
                         skip_bottom=skip_bottom,
                         fill=fill_child,
                         blend_mode=layer.blend_mode,
+                        order=self._layer_order(layer),
                     )
                 self._collect_css_rules(
                     layer.children,
@@ -8804,6 +9150,7 @@ class App(tk.Tk):
                     lines.append(f"  display: {display};")
                 if has_pseudo:
                     lines.append("  position: relative;")
+                self._append_order(lines, layer)
                 if layer.blend_mode != "normal":
                     lines.append(
                         f"  mix-blend-mode: {layer.blend_mode};"
@@ -8873,8 +9220,10 @@ class App(tk.Tk):
                     )
                     self._append_group_gap(lines, layer)
                     self._append_group_justify(lines, layer)
+                    self._append_group_align_items(lines, layer)
                     self._append_group_align(lines, layer)
                 self._append_group_inline_typography(lines, layer)
+                self._append_order(lines, layer)
                 if layer.blend_mode != "normal":
                     lines.append(
                         f"  mix-blend-mode: {layer.blend_mode};"
@@ -8892,16 +9241,21 @@ class App(tk.Tk):
                     or (display == "flex" and justify != "left")
                     or (display in ("flex", "grid") and gap > 0)
                     or inline_style is not None
+                    or layer.group_tag == "a"
                 ):
                     if lines:
                         lines.append("")
                     lines.append(f".{class_name} {{")
                     if display != "block":
                         lines.append(f"  display: {display};")
+                    elif layer.group_tag == "a":
+                        lines.append("  display: block;")
                     self._append_group_gap(lines, layer)
                     self._append_group_justify(lines, layer)
+                    self._append_group_align_items(lines, layer)
                     self._append_group_align(lines, layer)
                     self._append_group_inline_typography(lines, layer)
+                    self._append_order(lines, layer)
                     lines.append("}")
             self._append_pseudo_css(lines, layer, class_name)
             self._collect_css_rules(
@@ -9021,6 +9375,16 @@ class App(tk.Tk):
         }.get(self._layer_justify(layer), "flex-start")
         lines.append(f"  justify-content: {value};")
 
+    def _append_group_align_items(self, lines, layer):
+        if self._layer_display(layer) != "flex":
+            return
+        value = {
+            "start": "flex-start",
+            "center": "center",
+            "end": "flex-end",
+        }.get(self._layer_align_items(layer), "flex-start")
+        lines.append(f"  align-items: {value};")
+
     def _append_group_align(self, lines, layer):
         align = self._layer_align(layer)
         if align == "center":
@@ -9037,9 +9401,15 @@ class App(tk.Tk):
         if not skip_left and self._css_nonzero(left):
             lines.append(f"  margin-left: {self._css_num(left)}px;")
 
+    def _append_order(self, lines, layer):
+        order = self._layer_order(layer)
+        if order:
+            lines.append(f"  order: {order};")
+
     def _append_image_css(
         self, lines, class_name, record, left, gap,
         skip_left=False, skip_bottom=False, fill=False, blend_mode="normal",
+        order=0,
     ):
         if lines:
             lines.append("")
@@ -9069,6 +9439,8 @@ class App(tk.Tk):
             )
         if blend_mode != "normal":
             lines.append(f"  mix-blend-mode: {blend_mode};")
+        if order:
+            lines.append(f"  order: {order};")
         lines.append("}")
 
     def _layer_css_box(self, layer):
@@ -9144,10 +9516,10 @@ class App(tk.Tk):
             "border_width": 0,
         }
 
-    def _record_bounds(self, records):
+    def _record_bounds(self, records, record_layers=None):
         xs = []
         ys = []
-        for record in records:
+        for index, record in enumerate(records):
             kind = record.get("type")
             if kind in ("rect", "ellipse"):
                 xs.extend((record["x1"], record["x2"]))
@@ -9161,8 +9533,15 @@ class App(tk.Tk):
                 xs.extend((record["x"] - radius, record["x"] + radius))
                 ys.extend((record["y"] - radius, record["y"] + radius))
             elif kind == "text":
+                owner = (
+                    record_layers[index]
+                    if record_layers is not None
+                    else None
+                )
                 _font, _lines, widths, _advance, _spacing, height = (
-                    self._text_metrics(record)
+                    self._text_metrics(
+                        record, self._text_wrap_width(record, owner)
+                    )
                 )
                 xs.extend((record["x"], record["x"] + max(widths, default=0)))
                 ys.extend((record["y"], record["y"] + height))
@@ -9228,6 +9607,7 @@ class App(tk.Tk):
             return
         self.destroy()
 
+    # phím tắt 
     def _bind_keys(self):
         self.bind("<F11>", lambda _e: self.toggle_fullscreen())
         self.bind("<Escape>", lambda _e: self.exit_fullscreen())
@@ -9251,9 +9631,17 @@ class App(tk.Tk):
         self.bind("<Control-Q>", lambda _e: self._on_close())
         self.bind("<F1>", self._toggle_help_tab)
         self.bind("<Control-semicolon>", self._toggle_guides)
+        self.bind("<m>", lambda _e: self._shortcut_tool("move"))
+        self.bind("<M>", lambda _e: self._shortcut_tool("move"))
+        self.bind("<s>", lambda _e: self._shortcut_tool("marquee"))
+        self.bind("<S>", lambda _e: self._shortcut_tool("marquee"))
+        self.bind("<c>", lambda _e: self._shortcut_tool("crop"))
+        self.bind("<C>", lambda _e: self._shortcut_tool("crop"))
+        self.bind("<t>", lambda _e: self._shortcut_tool("text"))
         self.bind("<B1-Motion>", self._on_layer_drag, add="+")
         self.bind("<ButtonRelease-1>", self._on_layer_release, add="+")
         self.bind("<Button-1>", self._commit_rename_if_outside, add="+")
+        
 
     def start_maximized(self):
         self.state("zoomed")
@@ -9347,7 +9735,8 @@ class App(tk.Tk):
                  f"    |    Tài liệu: {doc}    |    {mode} {size}"
                  f"    |    Zoom: {round(self.zoom * 100)}%"
                  f"    |    F1 · F11 · Esc · Ctrl+N/O/S/E/Q · Ctrl+Shift+S"
-                 f" · Ctrl+J/G/Z · Ctrl+; · Ctrl+lăn chuột (zoom)"
+                 f" · Ctrl+J/G/Z · Ctrl+; · M/S/C (công cụ)"
+                 f" · Ctrl+lăn chuột (zoom)"
         )
 
 

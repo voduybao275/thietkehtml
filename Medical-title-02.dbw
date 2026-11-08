@@ -149,7 +149,7 @@
               "line_height": 1.4,
               "letter_spacing": 0,
               "text_transform": "none",
-              "text_align": "left",
+              "text_align": "center",
               "text_tag": "p"
             }
           ],
