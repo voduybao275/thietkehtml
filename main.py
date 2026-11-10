@@ -13,10 +13,12 @@ from tkinter import font as tkfont
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
 try:
-    from PIL import Image, ImageChops, ImageGrab, ImageMath
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageGrab, ImageMath
 except ImportError:
     Image = None
     ImageChops = None
+    ImageDraw = None
+    ImageFilter = None
     ImageGrab = None
     ImageMath = None
 
@@ -259,6 +261,14 @@ GROUP_ALIGN_ITEMS = ("start", "center", "end")
 
 LAYER_ORDERS = (-1, 0, 1, 2, 3, 4, 5)
 
+BOX_SHADOW_DEFAULTS = {
+    "x": 0,
+    "y": 6,
+    "blur": 18,
+    "opacity": 18,
+    "color": "#000000",
+}
+
 PSEUDO_KEYS = ("before", "after")
 
 PSEUDO_DISPLAYS = ("", "block", "inline-block", "inline", "none", "flex")
@@ -322,6 +332,7 @@ class Layer:
         self.align_items = "start"
         self.order = 0
         self.gap = 0
+        self.shadow = None
         self.blend_mode = "normal"
         self.text_format = ""
         self.group_tag = ""
@@ -462,6 +473,7 @@ class App(tk.Tk):
         self._move_moved = False
         self._export_window = None
         self._layer_options_window = None
+        self._shadow_window = None
         self._image_refs = {}
         self._image_scaled = {}
         self._text_areas = []
@@ -2606,6 +2618,57 @@ class App(tk.Tk):
             return 0
         return max(value, 0)
 
+    def _normalize_shadow(self, value):
+        if not isinstance(value, dict):
+            return None
+        shadow = dict(BOX_SHADOW_DEFAULTS)
+        try:
+            shadow["x"] = int(round(float(value.get("x", shadow["x"]))))
+            shadow["y"] = int(round(float(value.get("y", shadow["y"]))))
+            shadow["blur"] = max(
+                0, int(round(float(value.get("blur", shadow["blur"]))))
+            )
+            shadow["opacity"] = max(
+                0, min(100, int(round(float(
+                    value.get("opacity", shadow["opacity"])
+                ))))
+            )
+        except (TypeError, ValueError):
+            return None
+        color = str(value.get("color", shadow["color"])).strip()
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            shadow["color"] = color.lower()
+        return shadow
+
+    def _layer_shadow(self, layer):
+        return self._normalize_shadow(getattr(layer, "shadow", None))
+
+    def _set_layer_shadow(self, layer, value):
+        shadow = self._normalize_shadow(value)
+        if layer is None or shadow == self._layer_shadow(layer):
+            return
+        self._push_history()
+        layer.shadow = shadow
+        self._render_document()
+        self._refresh_doc_tab()
+
+    def _box_shadow_value(self, shadow):
+        color = shadow["color"]
+        if shadow["opacity"] >= 100:
+            color_css = color
+        else:
+            red, green, blue = (
+                int(color[1:3], 16),
+                int(color[3:5], 16),
+                int(color[5:7], 16),
+            )
+            alpha = f"{shadow['opacity'] / 100:.2f}".rstrip("0").rstrip(".")
+            color_css = f"rgba({red}, {green}, {blue}, {alpha})"
+        return (
+            f"{shadow['x']}px {shadow['y']}px {shadow['blur']}px "
+            f"{color_css}"
+        )
+
     def _normalize_pseudo(self, data):
         result = {}
         if not isinstance(data, dict):
@@ -3848,6 +3911,8 @@ class App(tk.Tk):
         clone.align_items = self._layer_align_items(layer)
         clone.order = self._layer_order(layer)
         clone.gap = self._layer_gap(layer)
+        shadow = self._layer_shadow(layer)
+        clone.shadow = dict(shadow) if shadow else None
         clone.blend_mode = layer.blend_mode
         clone.text_format = layer.text_format
         clone.group_tag = layer.group_tag
@@ -4073,6 +4138,7 @@ class App(tk.Tk):
             "align_items": self._layer_align_items(layer),
             "order": self._layer_order(layer),
             "gap": self._layer_gap(layer),
+            "shadow": self._layer_shadow(layer),
             "blend_mode": layer.blend_mode,
             "text_format": layer.text_format,
             "group_tag": layer.group_tag,
@@ -4126,6 +4192,8 @@ class App(tk.Tk):
                 if blend_mode in PSD_CSS_BLEND_MODES
                 else "normal"
             )
+            shadow = item.get("shadow", "")
+            layer.shadow = self._normalize_shadow(shadow)
             text_format = item.get("text_format", "")
             if text_format not in TEXT_FORMATS:
                 text_format = "span" if item.get("inline_text") else ""
@@ -4186,6 +4254,7 @@ class App(tk.Tk):
             "align_items": self._layer_align_items(layer),
             "order": self._layer_order(layer),
             "gap": self._layer_gap(layer),
+            "shadow": self._layer_shadow(layer),
             "blend_mode": layer.blend_mode,
             "text_format": layer.text_format,
             "group_tag": layer.group_tag,
@@ -4440,6 +4509,243 @@ class App(tk.Tk):
         parent.add_cascade(label="Order", menu=order_menu)
         return order_menu
 
+    def _open_shadow_dialog(self, layer):
+        self._commit_text_editor()
+        window = self._shadow_window
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_force()
+            return
+
+        shadow = self._layer_shadow(layer) or dict(BOX_SHADOW_DEFAULTS)
+        window = tk.Toplevel(self)
+        self._shadow_window = window
+        window.title(f"Box shadow — {layer.name}")
+        window.configure(bg=PANEL_BG)
+        window.resizable(False, False)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", self._close_shadow_dialog)
+        window.bind("<Escape>", lambda _e: self._close_shadow_dialog())
+
+        body = tk.Frame(window, bg=PANEL_BG, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+        tk.Label(
+            body,
+            text="Box shadow",
+            font=self.font_brand,
+            fg=TEXT,
+            bg=PANEL_BG,
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="X/Y là độ lệch bóng (px, cho phép số âm), Blur là độ "
+            "nhòe (px), Độ mờ tính theo %. Màu nhập trực tiếp dạng "
+            "#rrggbb hoặc chọn từ bảng màu. Giá trị được ghi vào "
+            "box-shadow trong style.css khi export HTML.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            justify="left",
+            wraplength=320,
+        ).pack(anchor="w", pady=(4, 12))
+
+        form = tk.Frame(body, bg=PANEL_BG)
+        form.pack(fill="x")
+        form.grid_columnconfigure(1, weight=1)
+
+        variables = {}
+        rows = (
+            ("x", "X (px)"),
+            ("y", "Y (px)"),
+            ("blur", "Blur (px)"),
+            ("opacity", "Độ mờ (%)"),
+        )
+        for row, (key, title) in enumerate(rows):
+            tk.Label(
+                form,
+                text=title,
+                font=("Segoe UI", 9),
+                fg=MUTED,
+                bg=PANEL_BG,
+                anchor="w",
+            ).grid(row=row, column=0, sticky="w", pady=4)
+            variable = tk.StringVar(value=str(shadow[key]))
+            variables[key] = variable
+            entry = tk.Entry(
+                form,
+                textvariable=variable,
+                width=10,
+                font=("Segoe UI", 9),
+                fg=TEXT,
+                bg="#0b1220",
+                insertbackground=TEXT,
+                relief="flat",
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                highlightcolor=ACCENT,
+            )
+            entry.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        color = shadow["color"]
+        color_var = tk.StringVar(value=color)
+        tk.Label(
+            form,
+            text="Màu",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(row=len(rows), column=0, sticky="w", pady=4)
+        color_row = tk.Frame(form, bg=PANEL_BG)
+        color_row.grid(row=len(rows), column=1, sticky="w", padx=(8, 0), pady=4)
+        swatch = tk.Label(
+            color_row,
+            text="",
+            width=3,
+            bg=color,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        swatch.pack(side="left")
+        color_value = tk.Entry(
+            color_row,
+            textvariable=color_var,
+            width=9,
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg="#0b1220",
+            insertbackground=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+        )
+        color_value.pack(side="left", padx=(8, 0))
+
+        def sync_swatch(*_args):
+            value = color_var.get().strip().lower()
+            if re.fullmatch(r"#[0-9a-f]{6}", value):
+                swatch.configure(bg=value)
+
+        color_var.trace_add("write", sync_swatch)
+
+        def choose_color():
+            _rgb, value = colorchooser.askcolor(
+                color_var.get(), parent=window, title="Chọn màu bóng"
+            )
+            if value:
+                color_var.set(value.lower())
+
+        tk.Button(
+            color_row,
+            text="Chọn màu…",
+            command=choose_color,
+            font=self.font_menu,
+            fg=TEXT,
+            bg=BORDER,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="left", padx=(10, 0))
+
+        error_var = tk.StringVar()
+        tk.Label(
+            body,
+            textvariable=error_var,
+            font=("Segoe UI", 9),
+            fg="#f87171",
+            bg=PANEL_BG,
+            anchor="w",
+        ).pack(anchor="w", pady=(8, 0))
+
+        def apply_shadow():
+            values = {}
+            try:
+                for key in ("x", "y", "blur", "opacity"):
+                    values[key] = int(float(variables[key].get().strip()))
+            except ValueError:
+                error_var.set("X, Y, Blur và Độ mờ phải là số.")
+                return
+            color_text = color_var.get().strip().lower()
+            if re.fullmatch(r"[0-9a-f]{6}", color_text):
+                color_text = f"#{color_text}"
+            if not re.fullmatch(r"#[0-9a-f]{6}", color_text):
+                error_var.set("Màu phải ở dạng #rrggbb.")
+                return
+            values["color"] = color_text
+            self._set_layer_shadow(layer, values)
+            self._close_shadow_dialog()
+
+        def remove_shadow():
+            self._set_layer_shadow(layer, None)
+            self._close_shadow_dialog()
+
+        actions = tk.Frame(body, bg=PANEL_BG)
+        actions.pack(fill="x", pady=(12, 0))
+        tk.Button(
+            actions,
+            text="Xóa bóng",
+            command=remove_shadow,
+            font=self.font_menu,
+            fg=TEXT,
+            bg=BORDER,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="left")
+        tk.Button(
+            actions,
+            text="Hủy",
+            command=self._close_shadow_dialog,
+            font=self.font_menu,
+            fg=TEXT,
+            bg=BORDER,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right")
+        tk.Button(
+            actions,
+            text="Áp dụng",
+            command=apply_shadow,
+            font=self.font_menu,
+            fg=BG,
+            bg=ACCENT,
+            activebackground="#60a5fa",
+            activeforeground=BG,
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right", padx=(0, 8))
+        window.bind("<Return>", lambda _e: apply_shadow())
+
+        window.update_idletasks()
+        width = window.winfo_reqwidth()
+        height = window.winfo_reqheight()
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 3
+        window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _close_shadow_dialog(self):
+        window = self._shadow_window
+        self._shadow_window = None
+        if window is not None and window.winfo_exists():
+            window.destroy()
+
     def _on_layer_context(self, event, layer):
         if layer not in self.selected_layers:
             self._select_layer(layer)
@@ -4496,6 +4802,10 @@ class App(tk.Tk):
                 ),
                 layer.group_tag,
                 self._set_group_format,
+            )
+            menu.add_command(
+                label="Box shadow…",
+                command=lambda target=layer: self._open_shadow_dialog(target),
             )
         elif self._layer_text_style(layer) is not None:
             menu.add_separator()
@@ -5791,9 +6101,7 @@ class App(tk.Tk):
                 if self.body_font_family != "none"
                 else "Segoe UI"
             )
-        size = max(int(round(int(record.get("font_size", 14)) * zoom)), 1)
-        if record.get("font_px"):
-            size = -size
+        size = -max(int(round(int(record.get("font_size", 14)) * zoom)), 1)
         key = (family, size, weight)
         font = self._font_cache.get(key)
         if font is None:
@@ -6151,6 +6459,7 @@ class App(tk.Tk):
         for layer in layers:
             if not layer.visible:
                 continue
+            self._draw_layer_shadow(layer, dx, dy, stretch_width)
             self._draw_layer_background(layer, dx, dy, stretch_width)
             self._draw_layer_pseudo(layer, "before", dx, dy)
             for record in layer.items:
@@ -6362,6 +6671,66 @@ class App(tk.Tk):
             offsets[id(child)] = (0.0, gap * row, None)
             row += 1
         return offsets
+
+    def _draw_layer_shadow(self, layer, dx=0.0, dy=0.0, stretch_width=None):
+        shadow = self._layer_shadow(layer) if layer.children else None
+        if not shadow or Image is None:
+            return
+        x1, y1, x2, y2 = self._layer_background_bounds(layer)
+        if stretch_width is not None:
+            x2 = x1 + stretch_width
+        zoom = self.zoom
+        width = max(round((x2 - x1) * zoom), 1)
+        height = max(round((y2 - y1) * zoom), 1)
+        result = self._shadow_photo(shadow, width, height, zoom)
+        if result is None:
+            return
+        photo, pad = result
+        self.doc_canvas.create_image(
+            (x1 + dx + shadow["x"]) * zoom - pad,
+            (y1 + dy + shadow["y"]) * zoom - pad,
+            image=photo,
+            anchor="nw",
+        )
+
+    def _shadow_photo(self, shadow, width, height, zoom):
+        cache_key = (
+            "shadow", shadow["x"], shadow["y"], shadow["blur"],
+            shadow["opacity"], shadow["color"], width, height, zoom,
+        )
+        cached = self._image_scaled.get(cache_key)
+        if cached is not None:
+            return cached
+        blur = max(round(shadow["blur"] * zoom), 0)
+        pad = blur * 2
+        red, green, blue = (
+            int(shadow["color"][1:3], 16),
+            int(shadow["color"][3:5], 16),
+            int(shadow["color"][5:7], 16),
+        )
+        image = Image.new(
+            "RGBA", (width + pad * 2, height + pad * 2), (0, 0, 0, 0)
+        )
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(
+            (pad, pad, pad + width - 1, pad + height - 1),
+            fill=(
+                red,
+                green,
+                blue,
+                max(round(shadow["opacity"] / 100 * 255), 0),
+            ),
+        )
+        if blur > 0:
+            image = image.filter(ImageFilter.GaussianBlur(blur / 2))
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        photo = tk.PhotoImage(
+            data=base64.b64encode(buffer.getvalue()).decode("ascii")
+        )
+        result = (photo, pad)
+        self._image_scaled[cache_key] = result
+        return result
 
     def _draw_layer_background(
         self, layer, dx=0.0, dy=0.0, stretch_width=None
@@ -7307,7 +7676,6 @@ class App(tk.Tk):
             "text_transform": "uppercase" if uppercase else "none",
             "text_align": align,
             "text_tag": "p",
-            "font_px": True,
         }
         if frame is not None:
             record["text_frame"] = frame
@@ -9318,6 +9686,7 @@ class App(tk.Tk):
                     self._append_group_justify(lines, layer)
                     self._append_group_align_items(lines, layer)
                     self._append_group_align(lines, layer)
+                self._append_group_shadow(lines, layer)
                 self._append_group_inline_typography(lines, layer)
                 self._append_order(lines, layer)
                 if layer.blend_mode != "normal":
@@ -9338,6 +9707,7 @@ class App(tk.Tk):
                     or (display in ("flex", "grid") and gap > 0)
                     or inline_style is not None
                     or layer.group_tag == "a"
+                    or self._layer_shadow(layer)
                 ):
                     if lines:
                         lines.append("")
@@ -9350,6 +9720,7 @@ class App(tk.Tk):
                     self._append_group_justify(lines, layer)
                     self._append_group_align_items(lines, layer)
                     self._append_group_align(lines, layer)
+                    self._append_group_shadow(lines, layer)
                     self._append_group_inline_typography(lines, layer)
                     self._append_order(lines, layer)
                     lines.append("}")
@@ -9488,6 +9859,12 @@ class App(tk.Tk):
             lines.append("  margin-right: auto;")
         elif align == "right":
             lines.append("  margin-left: auto;")
+
+    def _append_group_shadow(self, lines, layer):
+        shadow = self._layer_shadow(layer) if layer.children else None
+        if not shadow:
+            return
+        lines.append(f"  box-shadow: {self._box_shadow_value(shadow)};")
 
     def _append_flow_margins(
         self, lines, left, gap, skip_left=False, skip_bottom=False

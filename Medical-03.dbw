@@ -1,0 +1,91 @@
+{
+  "format": "dbw",
+  "version": 2,
+  "content_width": 960,
+  "content_height": 540,
+  "content_full": false,
+  "content_background": "white",
+  "body_font_family": "none",
+  "guides": [],
+  "layers": [
+    {
+      "name": "Lớp 1",
+      "visible": true,
+      "expanded": true,
+      "display": "block",
+      "align": "left",
+      "justify": "left",
+      "align_items": "start",
+      "order": 0,
+      "gap": 0,
+      "shadow": null,
+      "blend_mode": "normal",
+      "text_format": "",
+      "group_tag": "",
+      "pseudo": {},
+      "items": [],
+      "background_image": null,
+      "children": []
+    },
+    {
+      "name": "Nhóm 1",
+      "visible": true,
+      "expanded": true,
+      "display": "block",
+      "align": "left",
+      "justify": "left",
+      "align_items": "start",
+      "order": 0,
+      "gap": 0,
+      "shadow": {
+        "x": 0,
+        "y": 6,
+        "blur": 18,
+        "opacity": 18,
+        "color": "#000000"
+      },
+      "blend_mode": "normal",
+      "text_format": "",
+      "group_tag": "",
+      "pseudo": {},
+      "items": [],
+      "background_image": null,
+      "children": [
+        {
+          "name": "Hình chữ nhật 1",
+          "visible": true,
+          "expanded": true,
+          "display": "block",
+          "align": "left",
+          "justify": "left",
+          "align_items": "start",
+          "order": 0,
+          "gap": 0,
+          "shadow": null,
+          "blend_mode": "normal",
+          "text_format": "",
+          "group_tag": "",
+          "pseudo": {},
+          "items": [
+            {
+              "type": "rect",
+              "x1": 320.0,
+              "y1": 167.0,
+              "x2": 445.0,
+              "y2": 307.0,
+              "border_color": "#2563eb",
+              "border_width": 2,
+              "background": ""
+            }
+          ],
+          "background_image": null,
+          "children": []
+        }
+      ]
+    }
+  ],
+  "active_layer_path": [
+    1
+  ],
+  "layer_counter": 2
+}
