@@ -4,8 +4,12 @@ import html
 import json
 import math
 import os
+import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import tkinter as tk
 from collections import Counter
 from io import BytesIO
@@ -67,8 +71,32 @@ DROP_BG = "#1d4ed8"
 WINDOWED_SIZE = (1100, 700)
 MIN_SIZE = (760, 460)
 CONTENT_SIZE = (960, 540)
-IMAGE_FILE_PATTERN = "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.psd"
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".psd")
+IMAGE_FILE_PATTERN = "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.psd *.svg"
+IMAGE_EXTENSIONS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".psd",
+    ".svg",
+)
+LIBRARY_DIR_NAME = "thu-vien-hinh"
+LIBRARY_EXTENSIONS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".ico",
+    ".svg",
+)
+LIBRARY_COLUMNS = 4
+LIBRARY_THUMB_SIZE = 88
+LIBRARY_CELL_BG = "#0b1220"
+LIBRARY_THUMB_BG = "#f8fafc"
 RULER_SIZE = 22
 RULER_BG = "#0b1220"
 RULER_TICK = "#475569"
@@ -78,6 +106,108 @@ LAYER_PANEL_WIDTH = 240
 TOOL_SIZE = 40
 ZOOM_STEPS = (0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
 RULER_STEPS = (10, 20, 50, 100, 200, 500, 1000)
+
+
+def _icon_stroke(draw, points, color, width=16):
+    draw.line(points, fill=color, width=width, joint="curve")
+
+
+def _icon_star(draw, color):
+    points = []
+    for index in range(10):
+        angle = math.radians(-90 + index * 36)
+        radius = 92 if index % 2 == 0 else 38
+        points.append(
+            (128 + radius * math.cos(angle), 128 + radius * math.sin(angle))
+        )
+    draw.polygon(points, outline=color, width=14)
+
+
+def _icon_heart(draw, color):
+    draw.pieslice((46, 58, 134, 146), 150, 360, fill=color)
+    draw.pieslice((122, 58, 210, 146), 180, 390, fill=color)
+    draw.polygon([(54, 100), (202, 100), (128, 206)], fill=color)
+
+
+def _icon_check(draw, color):
+    _icon_stroke(draw, [(64, 136), (110, 182), (194, 82)], color, 18)
+
+
+def _icon_arrow(draw, color):
+    _icon_stroke(draw, [(56, 128), (196, 128)], color)
+    _icon_stroke(draw, [(148, 80), (198, 128), (148, 176)], color)
+
+
+def _icon_plus(draw, color):
+    _icon_stroke(draw, [(128, 62), (128, 194)], color, 18)
+    _icon_stroke(draw, [(62, 128), (194, 128)], color, 18)
+
+
+def _icon_user(draw, color):
+    draw.ellipse((98, 48, 158, 108), outline=color, width=14)
+    draw.arc((62, 138, 194, 258), 180, 360, fill=color, width=14)
+
+
+def _icon_home(draw, color):
+    _icon_stroke(draw, [(48, 126), (128, 56), (208, 126)], color)
+    _icon_stroke(draw, [(74, 116), (74, 204), (182, 204), (182, 116)], color)
+
+
+def _icon_search(draw, color):
+    draw.ellipse((58, 58, 168, 168), outline=color, width=16)
+    _icon_stroke(draw, [(170, 170), (206, 206)], color)
+
+
+def _icon_play(draw, color):
+    draw.ellipse((48, 48, 208, 208), outline=color, width=14)
+    draw.polygon([(108, 92), (174, 128), (108, 164)], fill=color)
+
+
+def _icon_download(draw, color):
+    _icon_stroke(draw, [(128, 52), (128, 168)], color)
+    _icon_stroke(draw, [(86, 126), (128, 168), (170, 126)], color)
+    _icon_stroke(draw, [(64, 192), (64, 208), (192, 208), (192, 192)], color)
+
+
+def _icon_mail(draw, color):
+    draw.rounded_rectangle((44, 72, 212, 184), radius=18, outline=color, width=14)
+    _icon_stroke(draw, [(58, 90), (128, 148), (198, 90)], color, 14)
+
+
+def _icon_pin(draw, color):
+    draw.ellipse((88, 40, 168, 120), outline=color, width=14)
+    _icon_stroke(draw, [(96, 106), (128, 212), (160, 106)], color, 14)
+    draw.ellipse((116, 68, 140, 92), fill=color)
+
+
+def _icon_chat(draw, color):
+    draw.rounded_rectangle((44, 56, 212, 172), radius=26, outline=color, width=14)
+    _icon_stroke(draw, [(88, 172), (88, 212), (128, 172)], color, 14)
+
+
+def _icon_bolt(draw, color):
+    draw.polygon(
+        [(148, 36), (76, 142), (124, 142), (108, 220), (184, 110), (136, 110)],
+        fill=color,
+    )
+
+
+_LIBRARY_ICONS = (
+    ("ngoi-sao", _icon_star),
+    ("trai-tim", _icon_heart),
+    ("dau-tich", _icon_check),
+    ("mui-ten", _icon_arrow),
+    ("dau-cong", _icon_plus),
+    ("nguoi-dung", _icon_user),
+    ("nha", _icon_home),
+    ("tim-kiem", _icon_search),
+    ("phat", _icon_play),
+    ("tai-xuong", _icon_download),
+    ("thu", _icon_mail),
+    ("vi-tri", _icon_pin),
+    ("tro-chuyen", _icon_chat),
+    ("tia-set", _icon_bolt),
+)
 
 
 def draw_move(c, col):
@@ -294,6 +424,8 @@ PSEUDO_DEFAULTS = {
     "font_weight": "",
     "display": "",
     "extra": "",
+    "mask": False,
+    "background_image": None,
 }
 
 SHORTCUTS = [
@@ -447,6 +579,9 @@ class App(tk.Tk):
         self.content_full = False
         self.content_background = "white"
         self.body_font_family = "none"
+        self.body_font_family_var = tk.StringVar(value=self.body_font_family)
+        self.body_font_family_entry = None
+        self.body_font_family_arrow = None
         self.zoom = 1.0
         self._content_size_window = None
         self.guides = []
@@ -473,6 +608,7 @@ class App(tk.Tk):
         self._move_moved = False
         self._export_window = None
         self._layer_options_window = None
+        self._library_picker = None
         self._shadow_window = None
         self._image_refs = {}
         self._image_scaled = {}
@@ -482,6 +618,10 @@ class App(tk.Tk):
         self._font_suggest_entry = None
         self._text_editor = None
         self._text_editor_record = None
+        self._library_dir = None
+        self._library_photo_cache = {}
+        self._svg_browser_checked = False
+        self._svg_browser_path = None
 
         self._build_fonts()
         self._build_ui()
@@ -596,7 +736,7 @@ class App(tk.Tk):
         )
         self.status.grid(row=2, column=0, columnspan=3, sticky="ew")
 
-        self.bind("<Configure>", lambda _e: self._update_status())
+        self.bind("<Configure>", lambda _e: self._update_status(), add="+")
 
     def _build_header(self):
         header = tk.Frame(self, bg=PANEL_BG)
@@ -765,7 +905,21 @@ class App(tk.Tk):
         )
         self.doc_tab_label.pack()
         self.doc_tab_label.configure(cursor="hand2")
-        self.doc_tab_label.bind("<Button-1>", self._hide_help_tab)
+        self.doc_tab_label.bind("<Button-1>", self._show_document_tab)
+
+        self.library_tab_label = tk.Label(
+            tabbar,
+            text="Thư viện hình",
+            font=self.font_layer,
+            fg=MUTED,
+            bg=PANEL_BG,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+        )
+        self.library_tab_label.pack(side="left", padx=(2, 0), pady=(12, 0))
+        self.library_tab_label.bind("<Button-1>", self._toggle_library_tab)
+        self.library_visible = False
 
         self.help_tab_label = tk.Label(
             tabbar,
@@ -958,10 +1112,139 @@ class App(tk.Tk):
             ).grid(row=row, column=1, sticky="w", padx=(16, 0), pady=3)
         self.help_panel.grid_remove()
 
+        self.library_panel = tk.Frame(workspace, bg=BG)
+        self.library_panel.grid(
+            row=1, column=0, sticky="nsew", padx=32, pady=(10, 26)
+        )
+        self.library_panel.grid_columnconfigure(0, weight=1)
+        self.library_panel.grid_rowconfigure(0, weight=1)
+
+        lib_card = tk.Frame(self.library_panel, bg=PANEL_BG, padx=24, pady=20)
+        lib_card.grid(row=0, column=0, sticky="nsew")
+        lib_card.grid_columnconfigure(0, weight=1)
+        lib_card.grid_rowconfigure(2, weight=1)
+
+        lib_header = tk.Frame(lib_card, bg=PANEL_BG)
+        lib_header.grid(row=0, column=0, sticky="ew")
+        lib_header.grid_columnconfigure(0, weight=1)
+
+        lib_titles = tk.Frame(lib_header, bg=PANEL_BG)
+        lib_titles.grid(row=0, column=0, sticky="w")
+        tk.Label(
+            lib_titles,
+            text="Thư viện hình",
+            font=self.font_brand,
+            fg=TEXT,
+            bg=PANEL_BG,
+            anchor="w",
+        ).pack(anchor="w")
+        self.library_path_var = tk.StringVar(value="")
+        tk.Label(
+            lib_titles,
+            textvariable=self.library_path_var,
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
+
+        lib_actions = tk.Frame(lib_header, bg=PANEL_BG)
+        lib_actions.grid(row=0, column=1, sticky="e")
+        for text, command, tip in (
+            (
+                "Thêm vào thư viện…",
+                self._library_add_files,
+                "Sao chép hình/icon vào thư mục thư viện",
+            ),
+            (
+                "Mở thư mục",
+                self._library_open_folder,
+                "Mở thư mục thư viện trong File Explorer",
+            ),
+            (
+                "Tải lại",
+                self._refresh_library,
+                "Đọc lại danh sách hình trong thư mục",
+            ),
+        ):
+            button = tk.Button(
+                lib_actions,
+                text=text,
+                command=command,
+                font=self.font_menu,
+                fg=TEXT,
+                bg=BORDER,
+                activebackground=HOVER_BG,
+                activeforeground=TEXT,
+                relief="flat",
+                padx=10,
+                pady=3,
+                cursor="hand2",
+                highlightthickness=0,
+            )
+            button.pack(side="left", padx=(8, 0))
+            Tooltip(button, tip)
+
+        lib_meta = tk.Frame(lib_card, bg=PANEL_BG)
+        lib_meta.grid(row=1, column=0, sticky="ew", pady=(12, 8))
+        self.library_count_var = tk.StringVar(value="")
+        tk.Label(
+            lib_meta,
+            textvariable=self.library_count_var,
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            lib_meta,
+            text="Nhấp vào hình để chèn vào thiết kế",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="e",
+        ).pack(side="right")
+
+        lib_body = tk.Frame(lib_card, bg=PANEL_BG)
+        lib_body.grid(row=2, column=0, sticky="nsew")
+        lib_body.grid_rowconfigure(0, weight=1)
+        lib_body.grid_columnconfigure(0, weight=1)
+        self.lib_canvas = tk.Canvas(
+            lib_body,
+            bg=PANEL_BG,
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=24,
+        )
+        self.lib_canvas.grid(row=0, column=0, sticky="nsew")
+        self.lib_vbar = tk.Scrollbar(
+            lib_body,
+            orient="vertical",
+            command=self.lib_canvas.yview,
+            bg=BORDER,
+            troughcolor=BG,
+            activebackground=HOVER_BG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.lib_vbar.grid(row=0, column=1, sticky="ns")
+        self.lib_canvas.configure(yscrollcommand=self.lib_vbar.set)
+        self.lib_grid = tk.Frame(self.lib_canvas, bg=PANEL_BG)
+        self._lib_window = self.lib_canvas.create_window(
+            (0, 0), window=self.lib_grid, anchor="nw"
+        )
+        for widget in (self.lib_canvas, self.lib_grid):
+            widget.bind("<Configure>", lambda _e: self._sync_library_scroll())
+            widget.bind("<MouseWheel>", self._on_library_mousewheel)
+        self.library_panel.grid_remove()
+
     def _show_help_tab(self, _event=None):
         if self.help_visible:
             return
         self._commit_text_editor()
+        if self.library_visible:
+            self._hide_library_tab()
         self.help_visible = True
         self.workspace_wrap.grid_remove()
         self.help_panel.grid()
@@ -986,6 +1269,414 @@ class App(tk.Tk):
             self._hide_help_tab()
         else:
             self._show_help_tab()
+
+    def _show_document_tab(self, _event=None):
+        self._hide_help_tab()
+        self._hide_library_tab()
+
+    def _show_library_tab(self, _event=None):
+        if self.library_visible:
+            return
+        self._commit_text_editor()
+        if self.help_visible:
+            self._hide_help_tab()
+        self.library_visible = True
+        self.workspace_wrap.grid_remove()
+        self.library_panel.grid()
+        self.library_tab_label.configure(fg=TEXT, bg=HOVER_BG)
+        self.doc_tab_label.configure(fg=MUTED)
+        self._refresh_library()
+        self.update_idletasks()
+        self._layout_content_viewport()
+
+    def _hide_library_tab(self, _event=None):
+        if not self.library_visible:
+            return
+        self.library_visible = False
+        self.library_panel.grid_remove()
+        self.workspace_wrap.grid()
+        self.library_tab_label.configure(fg=MUTED, bg=PANEL_BG)
+        self.doc_tab_label.configure(fg=TEXT)
+        self.update_idletasks()
+        self._layout_content_viewport()
+
+    def _toggle_library_tab(self, _event=None):
+        if self.library_visible:
+            self._hide_library_tab()
+        else:
+            self._show_library_tab()
+
+    def _library_folder(self):
+        if self._library_dir is not None:
+            return self._library_dir
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+        folder = os.path.join(base, LIBRARY_DIR_NAME)
+        created = not os.path.isdir(folder)
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            return None
+        if created:
+            self._library_seed_icons(folder)
+        self._library_dir = folder
+        return folder
+
+    def _library_seed_icons(self, folder):
+        if Image is None:
+            return
+        for name, painter in _LIBRARY_ICONS:
+            path = os.path.join(folder, f"{name}.png")
+            if os.path.exists(path):
+                continue
+            try:
+                icon = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+                painter(ImageDraw.Draw(icon), "#1e293b")
+                icon.save(path)
+            except (OSError, ValueError, AttributeError):
+                continue
+
+    def _library_files(self):
+        folder = self._library_folder()
+        if folder is None:
+            return [], None
+        try:
+            names = sorted(os.listdir(folder), key=str.lower)
+        except OSError:
+            return [], folder
+        files = []
+        for name in names:
+            if name.startswith("."):
+                continue
+            path = os.path.join(folder, name)
+            if not os.path.isfile(path):
+                continue
+            if os.path.splitext(name)[1].lower() in LIBRARY_EXTENSIONS:
+                files.append(path)
+        return files, folder
+
+    def _clear_library_grid(self):
+        for child in self.lib_grid.winfo_children():
+            child.destroy()
+
+    def _refresh_library(self, _event=None):
+        self._clear_library_grid()
+        files, folder = self._library_files()
+        if folder is None:
+            self.library_path_var.set("Không tạo được thư mục thư viện.")
+            self.library_count_var.set("0 hình")
+        else:
+            self.library_path_var.set(folder)
+            self.library_count_var.set(f"{len(files)} hình")
+        for column in range(LIBRARY_COLUMNS):
+            self.lib_grid.grid_columnconfigure(
+                column, weight=1, uniform="library"
+            )
+        if not files:
+            tk.Label(
+                self.lib_grid,
+                text=(
+                    "Thư viện đang trống.\n"
+                    "Nhấn “Thêm vào thư viện…” để sao chép hình hoặc icon vào đây."
+                ),
+                font=self.font_layer,
+                fg=MUTED,
+                bg=PANEL_BG,
+                justify="center",
+            ).grid(
+                row=0,
+                column=0,
+                columnspan=LIBRARY_COLUMNS,
+                pady=48,
+            )
+        else:
+            self._render_svg_thumbnails(
+                [
+                    path
+                    for path in files
+                    if os.path.splitext(path)[1].lower() == ".svg"
+                ]
+            )
+            for index, path in enumerate(files):
+                self._build_library_cell(
+                    path,
+                    index // LIBRARY_COLUMNS,
+                    index % LIBRARY_COLUMNS,
+                )
+        self.update_idletasks()
+        self._sync_library_scroll()
+
+    def _build_library_cell(self, path, row, column):
+        name = os.path.basename(path)
+        photo = self._library_photo(path)
+        cell = tk.Frame(
+            self.lib_grid, bg=LIBRARY_CELL_BG, padx=8, pady=8, cursor="hand2"
+        )
+        cell.grid(row=row, column=column, padx=6, pady=6, sticky="nsew")
+        if photo is not None:
+            thumb = tk.Label(
+                cell,
+                bg=LIBRARY_THUMB_BG,
+                image=photo,
+                padx=10,
+                pady=10,
+                cursor="hand2",
+            )
+        else:
+            thumb = tk.Label(
+                cell,
+                text="?",
+                font=self.font_brand,
+                fg=MUTED,
+                bg=LIBRARY_THUMB_BG,
+                padx=10,
+                pady=24,
+                cursor="hand2",
+            )
+        thumb.pack(fill="x")
+        label = name if len(name) <= 18 else f"{name[:16]}…"
+        caption = tk.Label(
+            cell,
+            text=label,
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=LIBRARY_CELL_BG,
+            anchor="center",
+            cursor="hand2",
+        )
+        caption.pack(fill="x", pady=(6, 0))
+
+        def enter(_event=None):
+            cell.configure(bg=HOVER_BG)
+            caption.configure(bg=HOVER_BG, fg=TEXT)
+
+        def leave(_event=None):
+            cell.configure(bg=LIBRARY_CELL_BG)
+            caption.configure(bg=LIBRARY_CELL_BG, fg=MUTED)
+
+        for widget in (cell, thumb, caption):
+            widget.bind("<Button-1>", lambda _e, p=path: self._insert_library_image(p))
+            widget.bind("<Enter>", enter)
+            widget.bind("<Leave>", leave)
+            widget.bind("<MouseWheel>", self._on_library_mousewheel)
+        Tooltip(thumb, f"{name}\nNhấp để chèn vào thiết kế")
+
+    def _library_photo(self, path):
+        try:
+            stat = os.stat(path)
+            key = (path, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+        cached = self._library_photo_cache.get(key)
+        if cached is not None:
+            return cached
+        if os.path.splitext(path)[1].lower() == ".svg":
+            thumbnail = self._svg_thumbnail_path(path)
+            if thumbnail is None or not os.path.exists(thumbnail):
+                return None
+            try:
+                photo = tk.PhotoImage(file=thumbnail)
+            except tk.TclError:
+                return None
+            self._library_photo_cache[key] = photo
+            return photo
+        photo = None
+        if Image is not None:
+            try:
+                with Image.open(path) as image:
+                    image.load()
+                    thumb = image.convert("RGBA")
+                    thumb.thumbnail(
+                        (LIBRARY_THUMB_SIZE, LIBRARY_THUMB_SIZE), Image.LANCZOS
+                    )
+                    buffer = BytesIO()
+                    thumb.save(buffer, format="PNG")
+                photo = tk.PhotoImage(
+                    data=base64.b64encode(buffer.getvalue()).decode("ascii")
+                )
+            except Exception:
+                photo = None
+        if photo is None:
+            try:
+                source = tk.PhotoImage(file=path)
+            except tk.TclError:
+                return None
+            factor = max(
+                1,
+                math.ceil(
+                    max(source.width(), source.height()) / LIBRARY_THUMB_SIZE
+                ),
+            )
+            photo = source.subsample(factor, factor) if factor > 1 else source
+        self._library_photo_cache[key] = photo
+        return photo
+
+    def _svg_thumbnail_path(self, path):
+        folder = self._library_folder()
+        if folder is None:
+            return None
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        cache = os.path.join(folder, ".thumbnails")
+        try:
+            os.makedirs(cache, exist_ok=True)
+        except OSError:
+            return None
+        stem = re.sub(
+            r"[^0-9A-Za-z._-]+",
+            "-",
+            os.path.splitext(os.path.basename(path))[0],
+        )[:40] or "svg"
+        return os.path.join(
+            cache, f"{stem}-{stat.st_mtime_ns}-{stat.st_size}.png"
+        )
+
+    def _render_svg_thumbnails(self, paths):
+        entries = []
+        for path in paths:
+            target = self._svg_thumbnail_path(path)
+            if target is None or os.path.exists(target):
+                continue
+            try:
+                uri = pathlib.Path(path).resolve().as_uri()
+            except (OSError, ValueError):
+                continue
+            entries.append((path, uri))
+        if not entries or Image is None or self._svg_browser() is None:
+            return
+        cell = LIBRARY_THUMB_SIZE * 2
+        columns = max(1, min(LIBRARY_COLUMNS, len(entries)))
+        rows = math.ceil(len(entries) / columns)
+        width, height = columns * cell, rows * cell
+        parts = [
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><style>",
+            "html,body{margin:0;padding:0;background:transparent;overflow:hidden}",
+            f"body{{display:grid;grid-template-columns:repeat({columns},{cell}px)}}",
+            f".c{{width:{cell}px;height:{cell}px;box-sizing:border-box;",
+            "padding:12px;display:flex;align-items:center;justify-content:center}",
+            ".c img{max-width:100%;max-height:100%}",
+            "</style></head><body>",
+        ]
+        for _path, uri in entries:
+            parts.append(f'<div class="c"><img src="{uri}"></div>')
+        parts.append("</body></html>")
+        with tempfile.TemporaryDirectory(prefix="tkhtml-svg-") as folder:
+            page_path = os.path.join(folder, "thumbs.html")
+            shot_path = os.path.join(folder, "thumbs.png")
+            with open(page_path, "w", encoding="utf-8") as handle:
+                handle.write("".join(parts))
+            if not self._run_svg_browser(page_path, width, height, shot_path):
+                return
+            try:
+                with Image.open(shot_path) as image:
+                    image.load()
+                    for index, (path, _uri) in enumerate(entries):
+                        target = self._svg_thumbnail_path(path)
+                        if target is None:
+                            continue
+                        column = index % columns
+                        row = index // columns
+                        tile = image.crop(
+                            (
+                                column * cell,
+                                row * cell,
+                                column * cell + cell,
+                                row * cell + cell,
+                            )
+                        ).convert("RGBA")
+                        tile.resize(
+                            (LIBRARY_THUMB_SIZE, LIBRARY_THUMB_SIZE),
+                            Image.LANCZOS,
+                        ).save(target)
+            except Exception:
+                return
+
+    def _library_add_files(self):
+        folder = self._library_folder()
+        if folder is None:
+            messagebox.showerror(
+                "Lỗi thư viện",
+                "Không tạo được thư mục thư viện.",
+                parent=self,
+            )
+            return
+        paths = filedialog.askopenfilenames(
+            parent=self,
+            title="Thêm hình vào thư viện",
+            filetypes=[
+                ("Hình ảnh", " ".join(f"*{ext}" for ext in LIBRARY_EXTENSIONS)),
+                ("Tất cả tệp", "*.*"),
+            ],
+        )
+        if not paths:
+            return
+        copied = 0
+        for source in paths:
+            source = os.path.abspath(source)
+            if os.path.dirname(source).lower() == folder.lower():
+                continue
+            base, extension = os.path.splitext(os.path.basename(source))
+            target = os.path.join(folder, os.path.basename(source))
+            index = 1
+            while os.path.exists(target):
+                target = os.path.join(folder, f"{base} ({index}){extension}")
+                index += 1
+            try:
+                shutil.copy2(source, target)
+            except OSError as error:
+                messagebox.showerror(
+                    "Lỗi sao chép",
+                    f"Không chép được “{os.path.basename(source)}”.\n{error}",
+                    parent=self,
+                )
+                continue
+            copied += 1
+        if copied:
+            self._refresh_library()
+
+    def _library_open_folder(self):
+        folder = self._library_folder()
+        if folder is None:
+            messagebox.showerror(
+                "Lỗi thư viện",
+                "Không tạo được thư mục thư viện.",
+                parent=self,
+            )
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(folder)
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", folder])
+        except OSError as error:
+            messagebox.showerror("Lỗi mở thư mục", str(error), parent=self)
+
+    def _sync_library_scroll(self):
+        canvas = self.lib_canvas
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+        if width <= 1 or height <= 1:
+            return
+        content_height = max(self.lib_grid.winfo_reqheight(), height)
+        canvas.itemconfigure(self._lib_window, width=width, height=content_height)
+        canvas.configure(scrollregion=(0, 0, width, content_height))
+
+    def _on_library_mousewheel(self, event):
+        delta = int(event.delta / 120)
+        if delta:
+            self.lib_canvas.yview_scroll(-delta * 2, "units")
+        return "break"
+
+    def _insert_library_image(self, path):
+        self._hide_library_tab()
+        self.update_idletasks()
+        self._insert_image_file(path)
 
     def _page_pixel_size(self):
         return (
@@ -1404,6 +2095,7 @@ class App(tk.Tk):
 
         window = tk.Toplevel(self)
         self._content_size_window = window
+        self.body_font_family_var.set(self.body_font_family)
         window.title("Kích thước nội dung")
         window.configure(bg=PANEL_BG)
         window.resizable(False, False)
@@ -1480,15 +2172,68 @@ class App(tk.Tk):
 
         tk.Label(
             form,
-            text="Nền trang",
+            text="Font chữ body",
             font=("Segoe UI", 10),
             fg=TEXT,
             bg=PANEL_BG,
             anchor="w",
         ).grid(row=2, column=0, sticky="w", pady=(12, 0))
+        font_row = tk.Frame(form, bg=PANEL_BG)
+        font_row.grid(
+            row=2, column=1, columnspan=2, sticky="ew",
+            padx=(10, 0), pady=(12, 0)
+        )
+        font_entry = self._make_info_entry(font_row, width=1)
+        font_entry.configure(
+            textvariable=self.body_font_family_var,
+            justify="left",
+        )
+        font_entry.pack(side="left", fill="x", expand=True)
+        font_arrow = tk.Label(
+            font_row,
+            text="▾",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg="#0b1220",
+            padx=5,
+            cursor="hand2",
+        )
+        font_arrow.pack(side="left", fill="y")
+        self.body_font_family_entry = font_entry
+        self.body_font_family_arrow = font_arrow
+        self.body_font_family_var.set(self.body_font_family)
+        font_entry.bind(
+            "<FocusIn>",
+            lambda _e: self._set_font_entry_active(font_entry),
+        )
+        font_entry.bind(
+            "<KeyRelease>",
+            lambda event: self._update_font_suggestions(event, font_entry),
+        )
+        font_entry.bind(
+            "<Return>",
+            lambda event: self._apply_font_field(event, font_entry),
+        )
+        font_entry.bind("<Down>", self._font_suggest_down)
+        font_entry.bind("<Up>", self._font_suggest_up)
+        font_entry.bind("<Escape>", self._hide_font_suggestions)
+        font_entry.bind("<FocusOut>", self._on_font_focus_out)
+        font_arrow.bind(
+            "<ButtonPress-1>",
+            lambda _e: self._toggle_font_suggestions(entry=font_entry),
+        )
+
+        tk.Label(
+            form,
+            text="Nền trang",
+            font=("Segoe UI", 10),
+            fg=TEXT,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(row=3, column=0, sticky="w", pady=(12, 0))
         background_row = tk.Frame(form, bg=PANEL_BG)
         background_row.grid(
-            row=2, column=1, columnspan=2, sticky="e", pady=(12, 0)
+            row=3, column=1, columnspan=2, sticky="e", pady=(12, 0)
         )
         for value, title in (("white", "Trắng"), ("none", "Không nền")):
             tk.Radiobutton(
@@ -1522,7 +2267,7 @@ class App(tk.Tk):
             bd=0,
             anchor="w",
             cursor="hand2",
-        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
         tk.Label(
             form,
             text="Body full — không đặt width/height khi xuất HTML.",
@@ -1531,7 +2276,7 @@ class App(tk.Tk):
             bg=PANEL_BG,
             anchor="w",
         ).grid(
-            row=3, column=1, columnspan=2, sticky="w", pady=(10, 0)
+            row=4, column=1, columnspan=2, sticky="w", pady=(10, 0)
         )
 
         actions = tk.Frame(body, bg=PANEL_BG)
@@ -1607,6 +2352,13 @@ class App(tk.Tk):
                 parent=window,
             )
             return
+        family = self.body_font_family_var.get().strip()[:60] or "none"
+        if family.lower() == "none":
+            family = "none"
+        self.body_font_family_var.set(family)
+        if family != self.body_font_family:
+            self._push_history()
+            self.body_font_family = family
         self._close_content_size_dialog(window)
         self.content_full = bool(full_var.get())
         background = background_var.get()
@@ -1617,10 +2369,21 @@ class App(tk.Tk):
         self._render_document()
 
     def _close_content_size_dialog(self, window):
+        self._hide_font_suggestions()
+        if self._font_focus_after is not None:
+            try:
+                self.after_cancel(self._font_focus_after)
+            except (tk.TclError, ValueError):
+                pass
+            self._font_focus_after = None
+        self._font_suggest_entry = None
+        self.body_font_family_entry = None
+        self.body_font_family_arrow = None
         if window is not None and window.winfo_exists():
             window.destroy()
         if self._content_size_window is window:
             self._content_size_window = None
+        self.body_font_family_var.set(self.body_font_family)
 
     def _build_layer_panel(self):
         panel = tk.Frame(self, bg=PANEL_BG, width=LAYER_PANEL_WIDTH)
@@ -1633,9 +2396,13 @@ class App(tk.Tk):
 
         inner = tk.Frame(panel, bg=PANEL_BG)
         inner.pack(side="left", fill="both", expand=True)
+        self.layer_panel_inner = inner
 
-        self._build_page_section(inner)
-        self._build_info_section(inner)
+        self.info_section = tk.Frame(inner, bg=PANEL_BG, height=1)
+        self.info_section.pack(fill="x")
+        self.info_section.pack_propagate(False)
+        self._build_info_section(self.info_section)
+        inner.bind("<Configure>", self._sync_info_section_height)
 
         header = tk.Frame(inner, bg=PANEL_BG)
         header.pack(fill="x", padx=14, pady=(12, 8))
@@ -1673,10 +2440,10 @@ class App(tk.Tk):
             self.layer_list_canvas,
             self.layer_list,
         ):
-            widget.bind("<MouseWheel>", self._on_layer_mousewheel)
             widget.bind(
                 "<Configure>", lambda _e: self._sync_layer_list_scroll()
             )
+        self.bind_all("<MouseWheel>", self._on_layer_mousewheel, add="+")
         self.after_idle(self._sync_layer_list_scroll)
 
         self.layer_count_label = tk.Label(
@@ -1693,6 +2460,7 @@ class App(tk.Tk):
 
     def _sync_layer_list_scroll(self):
         canvas = self.layer_list_canvas
+        self.update_idletasks()
         width = canvas.winfo_width()
         height = canvas.winfo_height()
         if width <= 1 or height <= 1:
@@ -1704,79 +2472,18 @@ class App(tk.Tk):
         canvas.configure(scrollregion=(0, 0, width, content_height))
 
     def _on_layer_mousewheel(self, event):
+        canvas = self.layer_list_canvas
+        if self.layer_list.winfo_reqheight() <= canvas.winfo_height():
+            return
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not canvas:
+            widget = widget.master
+        if widget is None:
+            return
         delta = int(event.delta / 120)
         if delta:
-            self.layer_list_canvas.yview_scroll(-delta * 2, "units")
+            canvas.yview_scroll(-delta * 2, "units")
         return "break"
-
-    def _build_page_section(self, parent):
-        header = tk.Frame(parent, bg=PANEL_BG)
-        header.pack(fill="x", padx=14, pady=(14, 8))
-        tk.Label(
-            header,
-            text="TRANG",
-            font=self.font_panel,
-            fg=MUTED,
-            bg=PANEL_BG,
-        ).pack(side="left")
-        tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=12)
-
-        body = tk.Frame(parent, bg=PANEL_BG)
-        body.pack(fill="x", padx=14, pady=(8, 10))
-        body.grid_columnconfigure(1, weight=1)
-
-        self._info_label(body, 0, "Font chữ body")
-        holder = tk.Frame(body, bg=PANEL_BG)
-        holder.grid(row=0, column=1, sticky="ew", pady=2)
-        self.body_font_family_var = tk.StringVar(value=self.body_font_family)
-        self.body_font_family_entry = self._make_info_entry(holder, width=1)
-        self.body_font_family_entry.configure(
-            textvariable=self.body_font_family_var,
-            justify="left",
-        )
-        self.body_font_family_entry.pack(side="left", fill="x", expand=True)
-        self.body_font_family_arrow = tk.Label(
-            holder,
-            text="▾",
-            font=("Segoe UI", 9),
-            fg=MUTED,
-            bg="#0b1220",
-            padx=5,
-            cursor="hand2",
-        )
-        self.body_font_family_arrow.pack(side="left", fill="y")
-        self.body_font_family_entry.bind(
-            "<FocusIn>",
-            lambda _e: self._set_font_entry_active(
-                self.body_font_family_entry
-            ),
-        )
-        self.body_font_family_entry.bind(
-            "<KeyRelease>",
-            lambda event: self._update_font_suggestions(
-                event, self.body_font_family_entry
-            ),
-        )
-        self.body_font_family_entry.bind(
-            "<Return>",
-            lambda event: self._apply_font_field(
-                event, self.body_font_family_entry
-            ),
-        )
-        self.body_font_family_entry.bind("<Down>", self._font_suggest_down)
-        self.body_font_family_entry.bind("<Up>", self._font_suggest_up)
-        self.body_font_family_entry.bind(
-            "<Escape>", self._hide_font_suggestions
-        )
-        self.body_font_family_entry.bind(
-            "<FocusOut>", self._on_font_focus_out
-        )
-        self.body_font_family_arrow.bind(
-            "<ButtonPress-1>",
-            lambda _e: self._toggle_font_suggestions(
-                entry=self.body_font_family_entry
-            ),
-        )
 
     def _build_info_section(self, parent):
         header = tk.Frame(parent, bg=PANEL_BG)
@@ -1817,7 +2524,7 @@ class App(tk.Tk):
         Tooltip(self.info_pin, "Ghim: luôn mở phần thông tin")
 
         self.info_content = tk.Frame(parent, bg=PANEL_BG)
-        self.info_content.pack(fill="x")
+        self.info_content.pack(fill="both", expand=True)
         tk.Frame(self.info_content, bg=BORDER, height=1).pack(
             fill="x", padx=12
         )
@@ -1853,9 +2560,29 @@ class App(tk.Tk):
             "Nhập X/Y để di chuyển layer — mốc: canvas",
         )
 
-        body = tk.Frame(self.info_content, bg=PANEL_BG)
-        body.pack(fill="x", padx=14, pady=(6, 10))
+        self.info_body_canvas = tk.Canvas(
+            self.info_content,
+            bg=PANEL_BG,
+            highlightthickness=0,
+            bd=0,
+            height=1,
+            yscrollincrement=20,
+        )
+        self.info_body_canvas.pack(
+            fill="both", expand=True, padx=14, pady=(6, 10)
+        )
+        body = tk.Frame(self.info_body_canvas, bg=PANEL_BG)
         body.grid_columnconfigure(1, weight=1)
+        self.info_body = body
+        self._info_body_window = self.info_body_canvas.create_window(
+            (0, 0), window=body, anchor="nw"
+        )
+        self._info_scroll_layer = None
+        self.info_body_canvas.bind(
+            "<Configure>", self._on_info_body_configure
+        )
+        body.bind("<Configure>", self._on_info_body_configure)
+        self.bind_all("<MouseWheel>", self._on_info_body_wheel, add="+")
 
         self.info_shape_rows = []
         self.info_text_rows = []
@@ -2348,6 +3075,19 @@ class App(tk.Tk):
         for widget in self.info_text_rows:
             widget.grid_remove()
 
+        for row_group in (
+            self.info_text_rows,
+            self.info_bg_image_rows,
+            self.info_bg_option_rows,
+            self.info_group_rows,
+            self.info_group_align_rows,
+            self.info_group_justify_rows,
+            self.info_group_gap_rows,
+            self.info_group_align_items_rows,
+        ):
+            for widget in row_group:
+                widget.grid_remove()
+
         tk.Frame(self.info_content, bg=BORDER, height=1).pack(
             fill="x", padx=12
         )
@@ -2382,7 +3122,10 @@ class App(tk.Tk):
         if self.info_collapsed:
             self.info_content.pack_forget()
         else:
-            self.info_content.pack(fill="x", after=self.info_header)
+            self.info_content.pack(
+                fill="both", expand=True, after=self.info_header
+            )
+        self._sync_info_section_height()
         self.info_chevron.configure(
             text="▸" if self.info_collapsed else "▾"
         )
@@ -2679,11 +3422,15 @@ class App(tk.Tk):
                 continue
             normalized = dict(PSEUDO_DEFAULTS)
             normalized["enabled"] = bool(value.get("enabled"))
+            normalized["mask"] = bool(value.get("mask"))
             for name in PSEUDO_DEFAULTS:
-                if name == "enabled":
+                if name in ("enabled", "background_image"):
                     continue
                 if isinstance(value.get(name), str):
                     normalized[name] = value[name]
+            background = value.get("background_image")
+            if isinstance(background, dict) and background.get("data"):
+                normalized["background_image"] = dict(background)
             if normalized["position"] not in PSEUDO_POSITIONS:
                 normalized["position"] = "absolute"
             result[key] = normalized
@@ -2807,6 +3554,9 @@ class App(tk.Tk):
 
     def _refresh_info(self):
         self._hide_font_suggestions()
+        if self._info_scroll_layer is not self.active_layer:
+            self._info_scroll_layer = self.active_layer
+            self.info_body_canvas.yview_moveto(0)
         rect = self._active_rect()
         image = self._active_image() if rect is None else None
         text = self._active_text() if rect is None and image is None else None
@@ -2958,6 +3708,47 @@ class App(tk.Tk):
         finally:
             self._updating_info = False
 
+    def _on_info_body_configure(self, _event=None):
+        canvas = self.info_body_canvas
+        width = canvas.winfo_width()
+        if width > 1:
+            canvas.itemconfigure(self._info_body_window, width=width)
+        canvas.configure(
+            scrollregion=(
+                0,
+                0,
+                max(width, 1),
+                self.info_body.winfo_reqheight(),
+            )
+        )
+
+    def _sync_info_section_height(self, event=None):
+        if event is not None:
+            if event.widget is not self.layer_panel_inner:
+                return
+            available = event.height
+        else:
+            available = self.layer_panel_inner.winfo_height()
+        if self.info_collapsed:
+            self.info_section.pack_propagate(True)
+            return
+        self.info_section.pack_propagate(False)
+        height = max(available // 2, 1)
+        if height != self.info_section.winfo_reqheight():
+            self.info_section.configure(height=height)
+
+    def _on_info_body_wheel(self, event):
+        canvas = self.info_body_canvas
+        if self.info_body.winfo_reqheight() <= canvas.winfo_height():
+            return
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not canvas:
+            widget = widget.master
+        if widget is None:
+            return
+        canvas.yview_scroll(int(-event.delta / 120), "units")
+        return "break"
+
     def _show_info_rows(self, show_text):
         self.info_title.configure(
             text="THÔNG TIN VĂN BẢN" if show_text else "THÔNG TIN HÌNH"
@@ -2995,13 +3786,9 @@ class App(tk.Tk):
 
     def _refresh_layer_position(self):
         layer = self.active_layer
-        if layer is None:
-            for widget in self.info_position_rows:
-                widget.grid_remove()
-            return
         for widget in self.info_position_rows:
             widget.grid()
-        position = self._layer_position(layer)
+        position = None if layer is None else self._layer_position(layer)
         values = (
             ("—", "—")
             if position is None
@@ -3012,8 +3799,13 @@ class App(tk.Tk):
         ):
             entry.delete(0, "end")
             entry.insert(0, value)
-        parent = layer.parent
-        target = "canvas" if parent is None else f"nhóm '{parent.name}'"
+        if layer is None:
+            target = "canvas"
+        else:
+            parent = layer.parent
+            target = (
+                "canvas" if parent is None else f"nhóm '{parent.name}'"
+            )
         self.info_position_tip.text = (
             f"Nhập X/Y để di chuyển layer — mốc: {target}"
         )
@@ -3553,6 +4345,8 @@ class App(tk.Tk):
         if family.lower() == "none":
             family = "none"
         self.body_font_family_var.set(family)
+        if self._content_size_window is not None:
+            return
         if family == self.body_font_family:
             return
         self._push_history()
@@ -4871,11 +5665,13 @@ class App(tk.Tk):
             text="Thiết lập ::before và ::after cho layer. Các khai báo "
             "được thêm vào style.css khi export HTML. Position mặc định "
             "là absolute; Top/Left/Bottom/Right nhận px hoặc %. Chọn "
-            "Display: inline-block nếu muốn width/height có hiệu lực.",
+            "Display: inline-block nếu muốn width/height có hiệu lực. "
+            "Nền ảnh: chọn hình từ thư viện; bật mask để dùng hình làm mask-image.",
             font=("Segoe UI", 9),
             fg=MUTED,
             bg=PANEL_BG,
             justify="left",
+            wraplength=920,
         ).pack(anchor="w", pady=(4, 14))
 
         sections = tk.Frame(body, bg=PANEL_BG)
@@ -5138,12 +5934,116 @@ class App(tk.Tk):
             pady=(6, 3),
         )
 
+        image_holder = {
+            "value": (
+                dict(data["background_image"])
+                if isinstance(data.get("background_image"), dict)
+                else None
+            )
+        }
+        tk.Label(
+            frame,
+            text="Nền ảnh",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).grid(row=11, column=0, sticky="w", pady=(8, 3))
+        image_row = tk.Frame(frame, bg=PANEL_BG)
+        image_row.grid(
+            row=11, column=1, columnspan=3, sticky="ew", pady=(8, 3)
+        )
+
+        def image_caption(value):
+            name = str(value.get("name") or "").strip() or "hình đã chọn"
+            return name if len(name) <= 24 else f"{name[:22]}…"
+
+        image_label = tk.Label(
+            image_row,
+            text="",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        )
+        image_label.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        def refresh_image_label():
+            value = image_holder["value"]
+            if value:
+                image_label.configure(text=image_caption(value), fg=TEXT)
+            else:
+                image_label.configure(text="Chưa chọn hình", fg=MUTED)
+
+        def pick_image():
+            window = frame.winfo_toplevel()
+
+            def accept(image):
+                image_holder["value"] = image
+                refresh_image_label()
+
+            self._open_library_picker(window, accept)
+
+        def clear_image():
+            image_holder["value"] = None
+            refresh_image_label()
+
+        tk.Button(
+            image_row,
+            text="Chọn từ thư viện…",
+            command=pick_image,
+            font=self.font_menu,
+            fg=TEXT,
+            bg=BORDER,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="left")
+        tk.Button(
+            image_row,
+            text="Xóa",
+            command=clear_image,
+            font=self.font_menu,
+            fg=MUTED,
+            bg=PANEL_BG,
+            activebackground=HOVER_BG,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=6,
+            pady=2,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="right")
+        refresh_image_label()
+
+        mask_var = tk.BooleanVar(value=bool(data.get("mask")))
+        tk.Checkbutton(
+            frame,
+            text="Dùng hình làm mask (mask-image)",
+            variable=mask_var,
+            font=("Segoe UI", 9),
+            fg=TEXT,
+            bg=PANEL_BG,
+            activebackground=PANEL_BG,
+            activeforeground=TEXT,
+            selectcolor=BG,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        ).grid(row=12, column=1, columnspan=3, sticky="w", pady=(0, 3))
+
         return {
             "enabled": enabled,
             "fields": variables,
             "display": (display_var, display_reverse),
             "position": (position_var, position_reverse),
             "extra": extra,
+            "background_image": image_holder,
+            "mask": mask_var,
         }
 
     def _save_layer_options(self, layer, forms, window):
@@ -5164,6 +6064,9 @@ class App(tk.Tk):
                 position_var.get(), "absolute"
             )
             data["extra"] = form["extra"].get("1.0", "end").strip()
+            background = form["background_image"]["value"]
+            data["background_image"] = dict(background) if background else None
+            data["mask"] = bool(form["mask"].get())
             pseudo[key] = data
         normalized = self._normalize_pseudo(pseudo)
         if normalized == self._normalize_pseudo(layer.pseudo):
@@ -5183,6 +6086,257 @@ class App(tk.Tk):
             window.destroy()
         if self._layer_options_window is window:
             self._layer_options_window = None
+
+    def _close_library_picker(self, window):
+        if window is not None and window.winfo_exists():
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            window.destroy()
+        if self._library_picker is window:
+            self._library_picker = None
+
+    def _open_library_picker(self, parent, on_select):
+        window = self._library_picker
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_force()
+            return
+        window = tk.Toplevel(parent)
+        self._library_picker = window
+        window.title("Chọn hình nền từ thư viện")
+        window.configure(bg=BG)
+        window.transient(parent)
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._close_library_picker(window),
+        )
+        window.bind(
+            "<Escape>", lambda _e: self._close_library_picker(window)
+        )
+
+        body = tk.Frame(window, bg=PANEL_BG, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+
+        header = tk.Frame(body, bg=PANEL_BG)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Chọn hình nền",
+            font=self.font_brand,
+            fg=TEXT,
+            bg=PANEL_BG,
+        ).pack(side="left")
+        actions = tk.Frame(header, bg=PANEL_BG)
+        actions.pack(side="right")
+        for text, command in (
+            ("Hủy", lambda: self._close_library_picker(window)),
+            ("Mở thư mục", self._library_open_folder),
+        ):
+            tk.Button(
+                actions,
+                text=text,
+                command=command,
+                font=self.font_menu,
+                fg=TEXT,
+                bg=BORDER,
+                activebackground=HOVER_BG,
+                activeforeground=TEXT,
+                relief="flat",
+                padx=10,
+                pady=2,
+                cursor="hand2",
+                highlightthickness=0,
+            ).pack(side="right", padx=(8, 0))
+        tk.Label(
+            body,
+            text="Nhấp vào hình để chọn làm nền cho ::before/::after.",
+            font=("Segoe UI", 9),
+            fg=MUTED,
+            bg=PANEL_BG,
+            anchor="w",
+        ).pack(fill="x", pady=(6, 0))
+
+        holder = tk.Frame(body, bg=PANEL_BG)
+        holder.pack(fill="both", expand=True, pady=(10, 0))
+        holder.grid_rowconfigure(0, weight=1)
+        holder.grid_columnconfigure(0, weight=1)
+        canvas = tk.Canvas(
+            holder,
+            bg=PANEL_BG,
+            highlightthickness=0,
+            bd=0,
+            yscrollincrement=24,
+        )
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll = tk.Scrollbar(
+            holder,
+            orient="vertical",
+            command=canvas.yview,
+            bg=BORDER,
+            troughcolor=BG,
+            activebackground=HOVER_BG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+        )
+        scroll.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scroll.set)
+        grid = tk.Frame(canvas, bg=PANEL_BG)
+        window_id = canvas.create_window((0, 0), window=grid, anchor="nw")
+
+        def sync(_event=None):
+            width = canvas.winfo_width()
+            height = canvas.winfo_height()
+            if width <= 1 or height <= 1:
+                return
+            content = max(grid.winfo_reqheight(), height)
+            canvas.itemconfigure(window_id, width=width, height=content)
+            canvas.configure(scrollregion=(0, 0, width, content))
+
+        def on_wheel(event):
+            delta = int(event.delta / 120)
+            if delta:
+                canvas.yview_scroll(-delta * 2, "units")
+            return "break"
+
+        canvas.bind("<Configure>", sync)
+        grid.bind("<Configure>", sync)
+        for widget in (canvas, grid, scroll):
+            widget.bind("<MouseWheel>", on_wheel)
+
+        def choose(path):
+            try:
+                with open(path, "rb") as handle:
+                    raw = handle.read()
+                data, mime, width, height = self._prepare_image(raw, path)
+            except (OSError, ValueError) as error:
+                messagebox.showerror(
+                    "Lỗi chọn hình", str(error), parent=window
+                )
+                return
+            image = {
+                "data": data,
+                "mime": mime,
+                "width": width,
+                "height": height,
+                "name": os.path.basename(path),
+                "size": "cover",
+                "position": "center",
+                "repeat": "no-repeat",
+            }
+            if os.path.splitext(path)[1].lower() == ".svg":
+                image["svg"] = base64.b64encode(raw).decode("ascii")
+            self._close_library_picker(window)
+            on_select(image)
+
+        def build_cell(path, row, column):
+            name = os.path.basename(path)
+            photo = self._library_photo(path)
+            cell = tk.Frame(
+                grid, bg=LIBRARY_CELL_BG, padx=8, pady=8, cursor="hand2"
+            )
+            cell.grid(row=row, column=column, padx=5, pady=5, sticky="nsew")
+            if photo is not None:
+                thumb = tk.Label(
+                    cell,
+                    bg=LIBRARY_THUMB_BG,
+                    image=photo,
+                    padx=8,
+                    pady=8,
+                    cursor="hand2",
+                )
+            else:
+                thumb = tk.Label(
+                    cell,
+                    text="?",
+                    font=self.font_brand,
+                    fg=MUTED,
+                    bg=LIBRARY_THUMB_BG,
+                    padx=8,
+                    pady=20,
+                    cursor="hand2",
+                )
+            thumb.pack(fill="x")
+            caption = tk.Label(
+                cell,
+                text=name if len(name) <= 18 else f"{name[:16]}…",
+                font=("Segoe UI", 9),
+                fg=MUTED,
+                bg=LIBRARY_CELL_BG,
+                anchor="center",
+                cursor="hand2",
+            )
+            caption.pack(fill="x", pady=(6, 0))
+
+            def enter(_event=None):
+                cell.configure(bg=HOVER_BG)
+                caption.configure(bg=HOVER_BG, fg=TEXT)
+
+            def leave(_event=None):
+                cell.configure(bg=LIBRARY_CELL_BG)
+                caption.configure(bg=LIBRARY_CELL_BG, fg=MUTED)
+
+            for widget in (cell, thumb, caption):
+                widget.bind(
+                    "<Button-1>", lambda _e, p=path: choose(p)
+                )
+                widget.bind("<Enter>", enter)
+                widget.bind("<Leave>", leave)
+                widget.bind("<MouseWheel>", on_wheel)
+            Tooltip(thumb, f"{name}\nNhấp để chọn làm nền")
+
+        def load():
+            for child in grid.winfo_children():
+                child.destroy()
+            files, _folder = self._library_files()
+            svgs = [
+                path
+                for path in files
+                if os.path.splitext(path)[1].lower() == ".svg"
+            ]
+            if svgs:
+                self._render_svg_thumbnails(svgs)
+            for column in range(LIBRARY_COLUMNS):
+                grid.grid_columnconfigure(
+                    column, weight=1, uniform="picker"
+                )
+            if not files:
+                tk.Label(
+                    grid,
+                    text=(
+                        "Thư viện đang trống.\n"
+                        "Thêm hình trong tab “Thư viện hình”."
+                    ),
+                    font=self.font_layer,
+                    fg=MUTED,
+                    bg=PANEL_BG,
+                    justify="center",
+                ).grid(
+                    row=0,
+                    column=0,
+                    columnspan=LIBRARY_COLUMNS,
+                    pady=40,
+                )
+            else:
+                for index, path in enumerate(files):
+                    build_cell(
+                        path,
+                        index // LIBRARY_COLUMNS,
+                        index % LIBRARY_COLUMNS,
+                    )
+            window.update_idletasks()
+            sync()
+
+        load()
+        window.update_idletasks()
+        width, height = 760, 560
+        x = self.winfo_rootx() + (self.winfo_width() - width) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - height) // 3
+        window.geometry(f"{width}x{height}+{max(x, 0)}+{max(y, 0)}")
+        window.grab_set()
+        window.focus_force()
 
     def _begin_rename(self, layer, label):
         entry = self._rename_entry
@@ -5868,6 +7022,9 @@ class App(tk.Tk):
         )
         if not path:
             return
+        self._insert_image_file(path)
+
+    def _insert_image_file(self, path):
         try:
             with open(path, "rb") as handle:
                 raw = handle.read()
@@ -5903,6 +7060,8 @@ class App(tk.Tk):
         self._refresh_doc_tab()
 
     def _prepare_image(self, raw, path):
+        if os.path.splitext(path)[1].lower() == ".svg":
+            return self._prepare_svg_image(raw, path)
         if Image is not None:
             try:
                 with Image.open(BytesIO(raw)) as image:
@@ -5927,6 +7086,239 @@ class App(tk.Tk):
             raise ValueError("Không đọc được tệp hình ảnh.") from error
         mime = "image/png" if extension == ".png" else "image/gif"
         return data, mime, photo.width(), photo.height()
+
+    def _prepare_svg_image(self, raw, path):
+        if Image is None:
+            raise ValueError("Cần cài Pillow để chèn hình SVG.")
+        width, height = self._svg_intrinsic_size(raw)
+        width, height = self._svg_display_size(width, height)
+        raster_width, raster_height = self._svg_raster_size(width, height)
+        cache_dir = self._svg_raster_cache_dir()
+        cache_name = self._svg_cache_name(path, raster_width, raster_height)
+        cache_path = (
+            os.path.join(cache_dir, cache_name)
+            if cache_dir and cache_name
+            else None
+        )
+        if cache_path and os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as handle:
+                    cached = handle.read()
+                return (
+                    base64.b64encode(cached).decode("ascii"),
+                    "image/png",
+                    width,
+                    height,
+                )
+            except OSError:
+                cache_path = None
+        png = self._render_svg_png(raw, path, raster_width, raster_height)
+        if png is None:
+            raise ValueError(
+                "Không chuyển được SVG sang ảnh. "
+                "Cần Microsoft Edge hoặc Google Chrome trên máy."
+            )
+        if cache_path:
+            try:
+                with open(cache_path, "wb") as handle:
+                    handle.write(png)
+            except OSError:
+                pass
+        return base64.b64encode(png).decode("ascii"), "image/png", width, height
+
+    def _svg_intrinsic_size(self, raw):
+        text = raw.decode("utf-8", "replace")[:20000]
+        root = re.search(r"<svg\b[^>]*>", text, re.IGNORECASE | re.DOTALL)
+        tag = root.group(0) if root else text
+        width = self._svg_px_value(
+            re.search(r'\bwidth\s*=\s*["\']\s*([^"\']+)', tag)
+        )
+        height = self._svg_px_value(
+            re.search(r'\bheight\s*=\s*["\']\s*([^"\']+)', tag)
+        )
+        view_w = view_h = None
+        viewbox = re.search(
+            r"\bviewBox\s*=\s*[\"']\s*([-0-9.]+)[\s,]+([-0-9.]+)"
+            r"[\s,]+([0-9.]+)[\s,]+([0-9.]+)",
+            tag,
+        )
+        if viewbox:
+            try:
+                view_w = float(viewbox.group(3))
+                view_h = float(viewbox.group(4))
+            except ValueError:
+                view_w = view_h = None
+        if view_w and view_h:
+            if width and not height:
+                height = width * view_h / view_w
+            elif height and not width:
+                width = height * view_w / view_h
+            elif not width and not height:
+                width, height = view_w, view_h
+        width = width or 256
+        height = height or 256
+        return max(1, int(round(width))), max(1, int(round(height)))
+
+    @staticmethod
+    def _svg_px_value(match):
+        if not match:
+            return None
+        found = re.fullmatch(
+            r"([0-9]*\.?[0-9]+)\s*(px)?", match.group(1).strip().lower()
+        )
+        if not found:
+            return None
+        try:
+            number = float(found.group(1))
+        except ValueError:
+            return None
+        return number if number > 0 else None
+
+    @staticmethod
+    def _svg_display_size(width, height):
+        longest = max(width, height)
+        if longest < 64:
+            factor = 64 / longest
+            width = max(1, int(round(width * factor)))
+            height = max(1, int(round(height * factor)))
+        return width, height
+
+    @staticmethod
+    def _svg_raster_size(width, height):
+        longest = max(width, height)
+        target = min(2048, max(512, longest))
+        scale = target / longest
+        return (
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        )
+
+    def _svg_cache_name(self, path, width, height):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        stem = re.sub(
+            r"[^0-9A-Za-z._-]+",
+            "-",
+            os.path.splitext(os.path.basename(path))[0],
+        )[:40] or "svg"
+        return (
+            f"{stem}-{stat.st_mtime_ns}-{stat.st_size}-{width}x{height}.png"
+        )
+
+    def _svg_raster_cache_dir(self):
+        folder = os.path.join(tempfile.gettempdir(), "thietkehtml-svg-cache")
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            return None
+        return folder
+
+    def _svg_browser(self):
+        if self._svg_browser_checked:
+            return self._svg_browser_path
+        self._svg_browser_checked = True
+        candidates = []
+        if os.name == "nt":
+            for base in (
+                os.environ.get("ProgramFiles(x86)"),
+                os.environ.get("ProgramFiles"),
+                os.environ.get("LOCALAPPDATA"),
+            ):
+                if not base:
+                    continue
+                candidates.append(
+                    os.path.join(
+                        base, "Microsoft", "Edge", "Application", "msedge.exe"
+                    )
+                )
+                candidates.append(
+                    os.path.join(
+                        base, "Google", "Chrome", "Application", "chrome.exe"
+                    )
+                )
+        for name in (
+            "msedge",
+            "chrome",
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+        ):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                self._svg_browser_path = candidate
+                break
+        return self._svg_browser_path
+
+    def _run_svg_browser(self, page_path, width, height, shot_path):
+        browser = self._svg_browser()
+        if browser is None:
+            return False
+        profile = tempfile.mkdtemp(prefix="tkhtml-svg-profile-")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        uri = pathlib.Path(page_path).resolve().as_uri()
+        base = [
+            browser,
+            "--disable-gpu",
+            "--hide-scrollbars",
+            "--force-device-scale-factor=1",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--window-size={width},{height}",
+            f"--screenshot={shot_path}",
+            "--default-background-color=00000000",
+            f"--user-data-dir={profile}",
+        ]
+        try:
+            for mode in ("--headless=new", "--headless"):
+                try:
+                    subprocess.run(
+                        base[:1] + [mode] + base[1:] + [uri],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=40,
+                        creationflags=flags,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                if os.path.exists(shot_path):
+                    return True
+            return False
+        finally:
+            shutil.rmtree(profile, ignore_errors=True)
+
+    def _render_svg_png(self, raw, path, width, height):
+        if self._svg_browser() is None:
+            return None
+        if os.path.isfile(path):
+            source = pathlib.Path(path).resolve().as_uri()
+        else:
+            source = (
+                "data:image/svg+xml;base64,"
+                + base64.b64encode(raw).decode("ascii")
+            )
+        page = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+            "html,body{margin:0;padding:0;background:transparent;overflow:hidden}"
+            f"img{{display:block;width:{width}px;height:{height}px}}"
+            f"</style></head><body><img src='{source}'></body></html>"
+        )
+        with tempfile.TemporaryDirectory(prefix="tkhtml-svg-") as folder:
+            page_path = os.path.join(folder, "page.html")
+            shot_path = os.path.join(folder, "shot.png")
+            with open(page_path, "w", encoding="utf-8") as handle:
+                handle.write(page)
+            if not self._run_svg_browser(page_path, width, height, shot_path):
+                return None
+            try:
+                with open(shot_path, "rb") as handle:
+                    return handle.read()
+            except OSError:
+                return None
 
     def _make_photo(self, record):
         data = record.get("data")
@@ -6001,6 +7393,19 @@ class App(tk.Tk):
 
     def _compose_background(self, data, width, height, size, position,
                             repeat):
+        composed = self._compose_background_image(
+            data, width, height, size, position, repeat
+        )
+        if composed is None:
+            return None
+        buffer = BytesIO()
+        composed.save(buffer, format="PNG")
+        return tk.PhotoImage(
+            data=base64.b64encode(buffer.getvalue()).decode("ascii")
+        )
+
+    def _compose_background_image(self, data, width, height, size, position,
+                                  repeat):
         try:
             raw = base64.b64decode(data)
             with Image.open(BytesIO(raw)) as source:
@@ -6038,11 +7443,119 @@ class App(tk.Tk):
                 y += tile_height
         else:
             composed.paste(tile, (offset_x, offset_y), tile)
+        return composed
+
+    def _pseudo_background_photo(
+        self, image, width, height, angle=0.0, scale=1.0
+    ):
+        width_px = max(round(width * self.zoom), 1)
+        height_px = max(round(height * self.zoom), 1)
+        if not angle and scale == 1:
+            return self._background_photo(image, width_px, height_px)
+        if Image is None:
+            return self._background_photo(image, width_px, height_px)
+        data = image.get("data")
+        if not data:
+            return None
+        key = (
+            id(image),
+            width_px,
+            height_px,
+            round(angle, 2),
+            round(scale, 3),
+        )
+        cached = self._image_scaled.get(key)
+        if cached is not None:
+            return cached
+        composed = self._compose_background_image(
+            data,
+            width_px,
+            height_px,
+            self._background_setting(image, "size"),
+            self._background_setting(image, "position"),
+            self._background_setting(image, "repeat"),
+        )
+        if composed is None:
+            return None
+        resample = getattr(Image, "Resampling", Image).BICUBIC
+        if scale != 1:
+            composed = composed.resize(
+                (
+                    max(round(composed.width * scale), 1),
+                    max(round(composed.height * scale), 1),
+                ),
+                resample,
+            )
+        if angle:
+            composed = composed.rotate(-angle, expand=True, resample=resample)
         buffer = BytesIO()
         composed.save(buffer, format="PNG")
-        return tk.PhotoImage(
+        photo = tk.PhotoImage(
             data=base64.b64encode(buffer.getvalue()).decode("ascii")
         )
+        self._image_scaled[key] = photo
+        return photo
+
+    def _pseudo_mask_photo(
+        self, image, color, width, height, angle=0.0, scale=1.0
+    ):
+        if Image is None:
+            return None
+        data = image.get("data")
+        if not data:
+            return None
+        width_px = max(round(width * self.zoom), 1)
+        height_px = max(round(height * self.zoom), 1)
+        try:
+            red, green, blue = (
+                value // 256 for value in self.winfo_rgb(color)
+            )
+        except tk.TclError:
+            red, green, blue = 255, 255, 255
+        key = (
+            "mask",
+            id(image),
+            (red, green, blue),
+            width_px,
+            height_px,
+            round(angle, 2),
+            round(scale, 3),
+        )
+        cached = self._image_scaled.get(key)
+        if cached is not None:
+            return cached
+        composed = self._compose_background_image(
+            data,
+            width_px,
+            height_px,
+            self._background_setting(image, "size"),
+            self._background_setting(image, "position"),
+            self._background_setting(image, "repeat"),
+        )
+        if composed is None:
+            return None
+        masked = Image.new(
+            "RGBA", composed.size, (red, green, blue, 255)
+        )
+        masked.putalpha(composed.getchannel("A"))
+        resample = getattr(Image, "Resampling", Image).BICUBIC
+        if scale != 1:
+            masked = masked.resize(
+                (
+                    max(round(masked.width * scale), 1),
+                    max(round(masked.height * scale), 1),
+                ),
+                resample,
+            )
+        if angle:
+            masked = masked.rotate(-angle, expand=True, resample=resample)
+        buffer = BytesIO()
+        masked.save(buffer, format="PNG")
+        photo = tk.PhotoImage(
+            data=base64.b64encode(buffer.getvalue()).decode("ascii")
+        )
+        self._image_scaled[key] = photo
+        return photo
 
     def _has_drawable_items(self, layer):
         if layer.items:
@@ -6467,7 +7980,6 @@ class App(tk.Tk):
                 continue
             self._draw_layer_shadow(layer, dx, dy, stretch_width)
             self._draw_layer_background(layer, dx, dy, stretch_width)
-            self._draw_layer_pseudo(layer, "before", dx, dy)
             for record in layer.items:
                 self._draw_record(record, dx, dy, stretch_width, layer)
             offsets = {}
@@ -6504,6 +8016,7 @@ class App(tk.Tk):
                     children_dx=child_children_dx,
                     children_dy=child_children_dy,
                 )
+            self._draw_layer_pseudo(layer, "before", dx, dy)
             self._draw_layer_pseudo(layer, "after", dx, dy)
 
     def _is_flex_fill_layer(self, layer):
@@ -7099,6 +8612,14 @@ class App(tk.Tk):
             return (px + tx) * zoom, (py + ty) * zoom
 
         fill = self._canvas_color(data.get("background", ""))
+        image = data.get("background_image")
+        mask = (
+            image
+            if data.get("mask")
+            and isinstance(image, dict)
+            and image.get("data")
+            else None
+        )
         corners = None
         if box_width > 0 and box_height > 0 and (fill or border_color):
             corners = [
@@ -7107,7 +8628,7 @@ class App(tk.Tk):
                 point(x1 + box_width, y1 + box_height),
                 point(x1, y1 + box_height),
             ]
-        if corners is not None and fill:
+        if corners is not None and fill and mask is None:
             if oval and not angle and scale == 1:
                 self.doc_canvas.create_oval(
                     corners[0][0],
@@ -7122,6 +8643,39 @@ class App(tk.Tk):
                     [value for corner in corners for value in corner],
                     fill=fill,
                     outline="",
+                )
+        if (
+            mask is not None
+            and fill
+            and box_width > 0
+            and box_height > 0
+        ):
+            photo = self._pseudo_mask_photo(
+                mask, fill, box_width, box_height, angle, scale
+            )
+            if photo is not None:
+                screen_x, screen_y = point(
+                    x1 + box_width / 2, y1 + box_height / 2
+                )
+                self.doc_canvas.create_image(
+                    screen_x, screen_y, image=photo, anchor="center"
+                )
+        if (
+            mask is None
+            and isinstance(image, dict)
+            and image.get("data")
+            and box_width > 0
+            and box_height > 0
+        ):
+            photo = self._pseudo_background_photo(
+                image, box_width, box_height, angle, scale
+            )
+            if photo is not None:
+                screen_x, screen_y = point(
+                    x1 + box_width / 2, y1 + box_height / 2
+                )
+                self.doc_canvas.create_image(
+                    screen_x, screen_y, image=photo, anchor="center"
                 )
         border_color = self._canvas_color(border_color)
         if corners is not None and border_width > 0 and border_color:
@@ -7275,7 +8829,7 @@ class App(tk.Tk):
         self._commit_text_editor()
         if not self._confirm_save_changes():
             return
-        self._hide_help_tab()
+        self._show_document_tab()
         self._new_doc_counter += 1
         self._reset_document_state()
         self.doc_name = f"Chưa có tên-{self._new_doc_counter}"
@@ -7396,7 +8950,7 @@ class App(tk.Tk):
         self.marquee_region = None
         self._marquee_start = None
         self.saved_signature = self._document_signature()
-        self._hide_help_tab()
+        self._show_document_tab()
         self._refresh_layers()
         self._render_document()
         self._refresh_doc_tab()
@@ -7427,7 +8981,7 @@ class App(tk.Tk):
             record_width = max(int(round(width * scale)), 1)
             record_height = max(int(round(height * scale)), 1)
 
-        self._hide_help_tab()
+        self._show_document_tab()
         self._new_doc_counter += 1
         self._reset_document_state()
         self.doc_name = os.path.splitext(os.path.basename(path))[0]
@@ -7754,7 +9308,7 @@ class App(tk.Tk):
             messagebox.showerror("Lỗi mở tệp PSD", str(error), parent=self)
             return
 
-        self._hide_help_tab()
+        self._show_document_tab()
         self._new_doc_counter += 1
         self._reset_document_state()
         self.doc_name = os.path.splitext(os.path.basename(path))[0]
@@ -8061,7 +9615,7 @@ class App(tk.Tk):
             )
             return False
         self._commit_text_editor()
-        self._hide_help_tab()
+        self._show_document_tab()
         self.update_idletasks()
         if not self.winfo_viewable():
             messagebox.showerror(
@@ -8220,7 +9774,7 @@ class App(tk.Tk):
                 parent=self,
             )
             return
-        self._hide_help_tab()
+        self._show_document_tab()
         self.update_idletasks()
         try:
             if kind == "svg":
@@ -8969,6 +10523,151 @@ class App(tk.Tk):
             parent=self,
         )
 
+    @staticmethod
+    def _css_px_to_rem(css):
+        pattern = re.compile(r"-?(?:\d+\.\d+|\d+|\.\d+)px", re.IGNORECASE)
+
+        def convert(text):
+            output = []
+            index = 0
+            length = len(text)
+            while index < length:
+                if text.startswith("/*", index):
+                    end = text.find("*/", index + 2)
+                    if end < 0:
+                        output.append(text[index:])
+                        break
+                    output.append(text[index:end + 2])
+                    index = end + 2
+                    continue
+                if text[index] in "\"'":
+                    quote = text[index]
+                    start = index
+                    index += 1
+                    while index < length:
+                        if text[index] == "\\":
+                            index += 2
+                            continue
+                        if text[index] == quote:
+                            index += 1
+                            break
+                        index += 1
+                    output.append(text[start:index])
+                    continue
+                if text[index:index + 4].lower() == "url(":
+                    start = index
+                    index += 4
+                    depth = 1
+                    while index < length and depth:
+                        token = text[index]
+                        if token in "\"'":
+                            quote = token
+                            index += 1
+                            while index < length:
+                                if text[index] == "\\":
+                                    index += 2
+                                    continue
+                                if text[index] == quote:
+                                    index += 1
+                                    break
+                                index += 1
+                            continue
+                        if token == "(":
+                            depth += 1
+                        elif token == ")":
+                            depth -= 1
+                        index += 1
+                    output.append(text[start:index])
+                    continue
+                match = pattern.match(text, index)
+                if match and (
+                    index == 0
+                    or not (
+                        text[index - 1].isalnum()
+                        or text[index - 1] in "_-"
+                    )
+                ):
+                    raw = match.group(0)
+                    value = float(raw[:-2])
+                    if abs(value) > 1:
+                        number = (
+                            f"{value / 10:.4f}".rstrip("0").rstrip(".")
+                        )
+                        output.append(f"{number}rem")
+                    else:
+                        output.append(raw)
+                    index = match.end()
+                    continue
+                output.append(text[index])
+                index += 1
+            return "".join(output)
+
+        lines = []
+        for line in css.splitlines():
+            brace = line.find("{")
+            if brace >= 0:
+                lines.append(
+                    line[:brace + 1] + convert(line[brace + 1:])
+                )
+            elif line.lstrip().startswith(("}", "@", "/*", "*")):
+                lines.append(line)
+            else:
+                lines.append(convert(line))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _dedupe_css_rules(css):
+        lines = css.splitlines()
+        blocks = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            stripped = line.strip()
+            if (
+                stripped.endswith("{")
+                and not stripped.startswith(("@", "/*", "*"))
+            ):
+                raw_lines = [line]
+                body = []
+                index += 1
+                while index < len(lines) and lines[index].strip() != "}":
+                    raw_lines.append(lines[index])
+                    body.append(lines[index].strip())
+                    index += 1
+                if index < len(lines):
+                    raw_lines.append(lines[index])
+                    index += 1
+                blocks.append((
+                    "rule",
+                    stripped[:-1].strip(),
+                    tuple(body),
+                    raw_lines,
+                ))
+                continue
+            blocks.append(("raw", None, None, [line]))
+            index += 1
+
+        output = []
+        last_body = {}
+        for kind, selector, body, raw_lines in blocks:
+            if kind == "raw":
+                output.extend(raw_lines)
+                continue
+            previous = last_body.get(selector)
+            last_body[selector] = body
+            if previous == body:
+                if output and not output[-1].strip():
+                    output.pop()
+                continue
+            output.extend(raw_lines)
+
+        collapsed = []
+        for line in output:
+            if not line.strip() and collapsed and not collapsed[-1].strip():
+                continue
+            collapsed.append(line)
+        return "\n".join(collapsed)
+
     def _build_export_content(self):
         html_lines = []
         self._collect_html_layers(self.layers, html_lines, 1)
@@ -9013,6 +10712,9 @@ class App(tk.Tk):
         if css:
             parts.append(css)
         css = "\n\n".join(parts)
+        css = self._dedupe_css_rules(css)
+        css = self._css_px_to_rem(css)
+        css = "html, body {\n  font-size: 10px;\n}\n\n" + css
         return "\n".join(html_lines), css
 
     @staticmethod
@@ -9078,6 +10780,14 @@ class App(tk.Tk):
         ).strip(" .")
         return f"{cleaned or 'layer'}-bg.jpg"
 
+    def _pseudo_background_filename(self, layer, pseudo, image=None):
+        name = self._layer_class_name(layer.name)
+        cleaned = "".join(
+            "-" if char in '\\/:*?"<>|' else char for char in name
+        ).strip(" .")
+        extension = "svg" if image and image.get("svg") else "png"
+        return f"{cleaned or 'layer'}-{pseudo}-bg.{extension}"
+
     def _visible_layers(self, layers):
         for layer in layers:
             if not layer.visible:
@@ -9103,12 +10813,47 @@ class App(tk.Tk):
                     self._background_export_filename(layer),
                     background["data"],
                 ))
-        if not entries:
+        pseudo_entries = []
+        for layer in self._visible_layers(self.layers):
+            for pseudo in PSEUDO_KEYS:
+                data = self._layer_pseudo(layer, pseudo)
+                if not data["enabled"]:
+                    continue
+                image = data.get("background_image")
+                if (
+                    isinstance(image, dict)
+                    and image.get("data")
+                    and not data.get("mask")
+                ):
+                    file_name = self._pseudo_background_filename(
+                        layer, pseudo, image
+                    )
+                    if image.get("svg"):
+                        pseudo_entries.append(
+                            (file_name, image["svg"], True)
+                        )
+                    else:
+                        pseudo_entries.append(
+                            (file_name, image["data"], False)
+                        )
+        if not entries and not pseudo_entries:
             return
         if Image is None:
             raise OSError("Cần cài Pillow để xuất hình ảnh sang JPG.")
         for file_name, data in entries:
             self._write_jpeg(os.path.join(folder, file_name), data)
+        for file_name, data, is_svg in pseudo_entries:
+            target = os.path.join(folder, file_name)
+            if is_svg:
+                with open(target, "wb") as handle:
+                    handle.write(base64.b64decode(data))
+            else:
+                self._write_png(target, data)
+
+    def _write_png(self, target, data):
+        raw = base64.b64decode(data)
+        with Image.open(BytesIO(raw)) as image:
+            image.save(target, format="PNG")
 
     def _write_jpeg(self, target, data):
         raw = base64.b64decode(data)
@@ -9711,6 +11456,8 @@ class App(tk.Tk):
                     self._append_group_justify(lines, layer)
                     self._append_group_align_items(lines, layer)
                     self._append_group_align(lines, layer)
+                if self._layer_has_pseudo(layer):
+                    lines.append("  position: relative;")
                 self._append_group_shadow(lines, layer)
                 self._append_group_inline_typography(lines, layer)
                 self._append_order(lines, layer)
@@ -9733,6 +11480,7 @@ class App(tk.Tk):
                     or inline_style is not None
                     or layer.group_tag == "a"
                     or self._layer_shadow(layer)
+                    or self._layer_has_pseudo(layer)
                 ):
                     if lines:
                         lines.append("")
@@ -9746,6 +11494,8 @@ class App(tk.Tk):
                     self._append_group_align_items(lines, layer)
                     self._append_group_align(lines, layer)
                     self._append_group_shadow(lines, layer)
+                    if self._layer_has_pseudo(layer):
+                        lines.append("  position: relative;")
                     self._append_group_inline_typography(lines, layer)
                     self._append_order(lines, layer)
                     lines.append("}")
@@ -9771,7 +11521,7 @@ class App(tk.Tk):
             data = self._layer_pseudo(layer, pseudo)
             if not data["enabled"]:
                 continue
-            declarations = self._pseudo_declarations(data)
+            declarations = self._pseudo_declarations(data, layer, pseudo)
             if lines:
                 lines.append("")
             lines.append(f".{class_name}::{pseudo} {{")
@@ -9779,7 +11529,7 @@ class App(tk.Tk):
                 lines.append(f"  {declaration}")
             lines.append("}")
 
-    def _pseudo_declarations(self, data):
+    def _pseudo_declarations(self, data, layer=None, pseudo=""):
         declarations = []
         content = str(data.get("content", "")).strip()
         if (
@@ -9826,6 +11576,41 @@ class App(tk.Tk):
         background = str(data.get("background", "")).strip()
         if background:
             declarations.append(f"background: {background};")
+        image = data.get("background_image")
+        if isinstance(image, dict) and image.get("data"):
+            size = self._background_setting(image, "size")
+            position = self._background_setting(image, "position")
+            repeat = self._background_setting(image, "repeat")
+            if data.get("mask"):
+                if image.get("svg"):
+                    source = f"data:image/svg+xml;base64,{image['svg']}"
+                else:
+                    mime = image.get("mime") or "image/png"
+                    source = f"data:{mime};base64,{image['data']}"
+                declarations.append(
+                    f'-webkit-mask-image: url("{source}");'
+                )
+                declarations.append(f'mask-image: url("{source}");')
+                declarations.append(f"-webkit-mask-size: {size};")
+                declarations.append(f"mask-size: {size};")
+                declarations.append(
+                    f"-webkit-mask-position: {position};"
+                )
+                declarations.append(f"mask-position: {position};")
+                declarations.append(f"-webkit-mask-repeat: {repeat};")
+                declarations.append(f"mask-repeat: {repeat};")
+            else:
+                file_name = (
+                    self._pseudo_background_filename(layer, pseudo, image)
+                    if layer is not None
+                    else ""
+                )
+                declarations.append(
+                    f'background-image: url("{file_name}");'
+                )
+                declarations.append(f"background-size: {size};")
+                declarations.append(f"background-position: {position};")
+                declarations.append(f"background-repeat: {repeat};")
         weight = str(data.get("font_weight", "")).strip()
         if weight:
             declarations.append(f"font-weight: {weight};")
