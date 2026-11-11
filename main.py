@@ -4807,6 +4807,12 @@ class App(tk.Tk):
                 label="Box shadow…",
                 command=lambda target=layer: self._open_shadow_dialog(target),
             )
+        elif self._is_shape_layer(layer):
+            menu.add_separator()
+            menu.add_command(
+                label="Box shadow…",
+                command=lambda target=layer: self._open_shadow_dialog(target),
+            )
         elif self._layer_text_style(layer) is not None:
             menu.add_separator()
             self._add_format_menu(
@@ -6672,17 +6678,34 @@ class App(tk.Tk):
             row += 1
         return offsets
 
+    def _layer_shadow_geometry(self, layer):
+        if layer.children:
+            return self._layer_background_bounds(layer), "rect", True
+        shapes = [
+            record
+            for record in layer.items
+            if record.get("type") in ("rect", "ellipse")
+        ]
+        if not shapes:
+            return None
+        record = shapes[-1]
+        kind = "ellipse" if record.get("type") == "ellipse" else "rect"
+        return (record["x1"], record["y1"], record["x2"], record["y2"]), kind, False
+
     def _draw_layer_shadow(self, layer, dx=0.0, dy=0.0, stretch_width=None):
-        shadow = self._layer_shadow(layer) if layer.children else None
+        shadow = self._layer_shadow(layer)
         if not shadow or Image is None:
             return
-        x1, y1, x2, y2 = self._layer_background_bounds(layer)
-        if stretch_width is not None:
+        geometry = self._layer_shadow_geometry(layer)
+        if geometry is None:
+            return
+        (x1, y1, x2, y2), kind, is_group = geometry
+        if is_group and stretch_width is not None:
             x2 = x1 + stretch_width
         zoom = self.zoom
         width = max(round((x2 - x1) * zoom), 1)
         height = max(round((y2 - y1) * zoom), 1)
-        result = self._shadow_photo(shadow, width, height, zoom)
+        result = self._shadow_photo(shadow, width, height, zoom, kind)
         if result is None:
             return
         photo, pad = result
@@ -6693,9 +6716,9 @@ class App(tk.Tk):
             anchor="nw",
         )
 
-    def _shadow_photo(self, shadow, width, height, zoom):
+    def _shadow_photo(self, shadow, width, height, zoom, kind="rect"):
         cache_key = (
-            "shadow", shadow["x"], shadow["y"], shadow["blur"],
+            "shadow", kind, shadow["x"], shadow["y"], shadow["blur"],
             shadow["opacity"], shadow["color"], width, height, zoom,
         )
         cached = self._image_scaled.get(cache_key)
@@ -6712,15 +6735,17 @@ class App(tk.Tk):
             "RGBA", (width + pad * 2, height + pad * 2), (0, 0, 0, 0)
         )
         draw = ImageDraw.Draw(image)
-        draw.rectangle(
-            (pad, pad, pad + width - 1, pad + height - 1),
-            fill=(
-                red,
-                green,
-                blue,
-                max(round(shadow["opacity"] / 100 * 255), 0),
-            ),
+        box = (pad, pad, pad + width - 1, pad + height - 1)
+        fill = (
+            red,
+            green,
+            blue,
+            max(round(shadow["opacity"] / 100 * 255), 0),
         )
+        if kind == "ellipse":
+            draw.ellipse(box, fill=fill)
+        else:
+            draw.rectangle(box, fill=fill)
         if blur > 0:
             image = image.filter(ImageFilter.GaussianBlur(blur / 2))
         buffer = BytesIO()
@@ -9861,7 +9886,9 @@ class App(tk.Tk):
             lines.append("  margin-left: auto;")
 
     def _append_group_shadow(self, lines, layer):
-        shadow = self._layer_shadow(layer) if layer.children else None
+        if not layer.children and not self._is_shape_layer(layer):
+            return
+        shadow = self._layer_shadow(layer)
         if not shadow:
             return
         lines.append(f"  box-shadow: {self._box_shadow_value(shadow)};")
